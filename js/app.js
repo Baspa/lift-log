@@ -24,10 +24,10 @@ let wakeLock = null;
 let toastTimeout = null;
 
 function loadStore() {
-  const fresh = { sessions: {}, timer: null, tab: 'train', selection: null, lastLogAt: null };
+  const fresh = { sessions: {}, timer: null, tab: 'train', selection: null, lastLogAt: null, settings: { restTimer: true } };
   try {
     const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
-    return saved?.sessions ? { ...fresh, ...saved } : fresh;
+    return saved?.sessions ? { ...fresh, ...saved, settings: { ...fresh.settings, ...saved.settings } } : fresh;
   } catch {
     return fresh;
   }
@@ -395,11 +395,18 @@ function renderGuide() {
       <ul class="howto">
         <li>Train opens the next day in the rotation. Doing a different one? Tap Day 1–4 at the top.</li>
         <li>Exercises are listed in order. Enter kg and reps, then tap ✓. An empty field copies last time’s value.</li>
-        <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum.</li>
+        <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum. Turn it off below.</li>
         <li>Supersets: do A1, go straight to A2, then rest.</li>
         <li><em>Add a little weight</em> shows up when you hit the top of the rep range on every set last time.</li>
         <li>Install: in Safari tap Share → Add to Home Screen. It then runs full screen and works offline.</li>
       </ul>
+    </section>
+    <section class="card">
+      <h2>Settings</h2>
+      <label class="setting">
+        <span><strong>Rest timer</strong><small>Show a countdown after each set</small></span>
+        <input id="setting-rest-timer" class="switch" type="checkbox" role="switch"${store.settings.restTimer ? ' checked' : ''}>
+      </label>
     </section>`;
 }
 
@@ -476,7 +483,14 @@ function announceNextStep(steps, session, logged) {
     toast(`Superset: straight to ${next.exercise.name}`);
     return;
   }
+  if (!store.settings.restTimer) return;
   startTimer(logged.restAfter, `Next: ${next.exercise.name} · set ${next.set + 1}`);
+}
+
+function setRestTimer(enabled) {
+  store.settings.restTimer = enabled;
+  if (!enabled) stopTimer();
+  save();
 }
 
 function scrollToNext(loggedBlockIndex, session) {
@@ -709,6 +723,7 @@ document.addEventListener('input', (event) => {
 
 document.addEventListener('change', (event) => {
   if (event.target.id === 'import-file') importBackup(event.target);
+  if (event.target.id === 'setting-rest-timer') setRestTimer(event.target.checked);
 });
 
 // The keyboard covers the bottom of the screen, so the tab bar and timer only get in the way while typing.

@@ -224,7 +224,6 @@ function workoutView(workoutId) {
       </div>
       <p class="progress-label">${done === steps.length ? 'All sets done' : `${done} of ${steps.length} sets`}</p>
     </header>
-    ${done === 0 ? '<p class="note"><strong>Warm up first:</strong> 5–7 min easy cardio or mobility, then 2–3 lighter sets before the first lift. Don’t log warm-up sets.</p>' : ''}
     <ol class="blocks">${workout.blocks.map((block, index) => blockCard(block, index, steps, session, next)).join('')}</ol>
     ${done === steps.length ? doneCard(workout, session) : ''}
     ${session ? `<button class="link-danger" data-action="reset-session">Clear today’s ${workout.name} log</button>` : ''}`;

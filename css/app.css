@@ -314,6 +314,39 @@ h1 {
   min-width: 0;
 }
 
+.block-toggle {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin: -7px -6px 0 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.block-toggle svg {
+  width: 20px;
+  height: 20px;
+  transform: rotate(180deg);
+  transition: transform 0.2s;
+}
+
+.block.is-folded .block-toggle svg {
+  transform: none;
+}
+
+.block.is-folded {
+  padding-bottom: 14px;
+}
+
+.block.is-folded .meta {
+  display: none;
+}
+
 .block-title h2 {
   font-size: 17px;
   font-weight: 700;

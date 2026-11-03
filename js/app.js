@@ -9,6 +9,7 @@ const TIMER_TICK_MS = 250;
 const ICONS = {
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>',
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
 };
 
@@ -24,10 +25,10 @@ let wakeLock = null;
 let toastTimeout = null;
 
 function loadStore() {
-  const fresh = { sessions: {}, timer: null, tab: 'train', selection: null, lastLogAt: null };
+  const fresh = { sessions: {}, timer: null, tab: 'train', selection: null, lastLogAt: null, settings: { restTimer: true }, folds: null };
   try {
     const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
-    return saved?.sessions ? { ...fresh, ...saved } : fresh;
+    return saved?.sessions ? { ...fresh, ...saved, settings: { ...fresh.settings, ...saved.settings } } : fresh;
   } catch {
     return fresh;
   }
@@ -224,10 +225,23 @@ function workoutView(workoutId) {
       </div>
       <p class="progress-label">${done === steps.length ? 'All sets done' : `${done} of ${steps.length} sets`}</p>
     </header>
-    ${done === 0 ? '<p class="note"><strong>Warm up first:</strong> 5–7 min easy cardio or mobility, then 2–3 lighter sets before the first lift. Don’t log warm-up sets.</p>' : ''}
     <ol class="blocks">${workout.blocks.map((block, index) => blockCard(block, index, steps, session, next)).join('')}</ol>
     ${done === steps.length ? doneCard(workout, session) : ''}
     ${session ? `<button class="link-danger" data-action="reset-session">Clear today’s ${workout.name} log</button>` : ''}`;
+}
+
+// Done exercises fold away by default; a tap on the chevron overrides that for today's session.
+function isBlockOpen(workoutId, blockIndex, isDone) {
+  const folds = store.folds?.key === sessionKey(isoDate(), workoutId) ? store.folds.open : {};
+  return folds[blockIndex] ?? !isDone;
+}
+
+function toggleBlock(item) {
+  const key = sessionKey(isoDate(), selectedWorkoutId());
+  if (store.folds?.key !== key) store.folds = { key, open: {} };
+  store.folds.open[item.dataset.block] = item.classList.contains('is-folded');
+  save();
+  renderTrain();
 }
 
 function blockCard(block, blockIndex, steps, session, next) {
@@ -248,18 +262,21 @@ function blockCard(block, blockIndex, steps, session, next) {
     return roundLabel + setRow(step, label, session, previous[step.exercise.id], step === next);
   });
 
-  const classes = ['block', isSuperset && 'is-superset', isDone && 'is-done', isCurrent && 'is-current'].filter(Boolean).join(' ');
+  const isOpen = isBlockOpen(selectedWorkoutId(), blockIndex, isDone);
+  const name = block.exercises.map((exercise) => exercise.name).join(' + ');
+  const classes = ['block', isSuperset && 'is-superset', isDone && 'is-done', isCurrent && 'is-current', !isOpen && 'is-folded'].filter(Boolean).join(' ');
   return `
     <li class="${classes}" data-block="${blockIndex}">
       <div class="block-head">
         <span class="block-num">${isDone ? ICONS.check : blockIndex + 1}</span>
         <div class="block-title">${isSuperset ? supersetTitle(block) : singleTitle(block)}</div>
+        <button class="block-toggle" data-action="toggle-block" aria-expanded="${isOpen}" aria-label="${isOpen ? 'Hide' : 'Show'} ${name}">${ICONS.chevron}</button>
       </div>
-      ${hints}
+      ${isOpen ? `${hints}
       <div class="sets">
         <div class="set-head" aria-hidden="true"><span>${isSuperset ? '' : 'Set'}</span><span>Last time</span><span>kg</span><span>Reps</span><span></span></div>
         ${rows.join('')}
-      </div>
+      </div>` : ''}
     </li>`;
 }
 
@@ -396,11 +413,19 @@ function renderGuide() {
       <ul class="howto">
         <li>Train opens the next day in the rotation. Doing a different one? Tap Day 1–4 at the top.</li>
         <li>Exercises are listed in order. Enter kg and reps, then tap ✓. An empty field copies last time’s value.</li>
-        <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum.</li>
+        <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum. Turn it off below.</li>
         <li>Supersets: do A1, go straight to A2, then rest.</li>
+        <li>Finished exercises fold away. Tap the arrow on any exercise to show or hide it.</li>
         <li><em>Add a little weight</em> shows up when you hit the top of the rep range on every set last time.</li>
         <li>Install: in Safari tap Share → Add to Home Screen. It then runs full screen and works offline.</li>
       </ul>
+    </section>
+    <section class="card">
+      <h2>Settings</h2>
+      <label class="setting">
+        <span><strong>Rest timer</strong><small>Show a countdown after each set</small></span>
+        <input id="setting-rest-timer" class="switch" type="checkbox" role="switch"${store.settings.restTimer ? ' checked' : ''}>
+      </label>
     </section>`;
 }
 
@@ -477,7 +502,14 @@ function announceNextStep(steps, session, logged) {
     toast(`Superset: straight to ${next.exercise.name}`);
     return;
   }
+  if (!store.settings.restTimer) return;
   startTimer(logged.restAfter, `Next: ${next.exercise.name} · set ${next.set + 1}`);
+}
+
+function setRestTimer(enabled) {
+  store.settings.restTimer = enabled;
+  if (!enabled) stopTimer();
+  save();
 }
 
 function scrollToNext(loggedBlockIndex, session) {
@@ -695,6 +727,7 @@ document.addEventListener('click', (event) => {
   if (button.dataset.tab) return selectTab(button.dataset.tab);
   const actions = {
     'toggle-set': () => toggleSet(button.closest('.set')),
+    'toggle-block': () => toggleBlock(button.closest('.block')),
     'reset-session': resetSession,
     'timer-adjust': () => adjustTimer(Number(button.dataset.seconds)),
     'timer-skip': stopTimer,
@@ -710,6 +743,7 @@ document.addEventListener('input', (event) => {
 
 document.addEventListener('change', (event) => {
   if (event.target.id === 'import-file') importBackup(event.target);
+  if (event.target.id === 'setting-rest-timer') setRestTimer(event.target.checked);
 });
 
 // The keyboard covers the bottom of the screen, so the tab bar and timer only get in the way while typing.

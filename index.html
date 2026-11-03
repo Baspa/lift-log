@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Lift Log</title>
+  <meta name="description" content="4-day upper/lower muscle growth workout: log weights, follow the order, time your rest.">
+  <meta name="theme-color" content="#0b0d10">
+  <meta name="color-scheme" content="dark">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Lift Log">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="apple-touch-startup-image" href="icons/splash-1206x2622.png"
+    media="(device-width: 402px) and (device-height: 874px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)">
+  <link rel="stylesheet" href="css/app.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <div class="statusbar" aria-hidden="true"></div>
+
+  <main id="view-train" class="view"></main>
+  <main id="view-history" class="view" hidden></main>
+  <main id="view-guide" class="view" hidden></main>
+
+  <section id="timer" class="timer" hidden aria-label="Rest timer">
+    <div class="timer-row">
+      <div class="timer-readout">
+        <p class="timer-label" id="timer-label">Rest</p>
+        <p class="timer-time" id="timer-time">0:00</p>
+      </div>
+      <div class="timer-actions">
+        <button data-action="timer-adjust" data-seconds="-15" aria-label="15 seconds less rest">−15</button>
+        <button data-action="timer-adjust" data-seconds="15" aria-label="15 seconds more rest">+15</button>
+        <button data-action="timer-skip">Skip</button>
+      </div>
+    </div>
+    <div class="timer-bar"><span class="timer-fill" id="timer-fill"></span><span class="timer-tick" id="timer-tick"></span></div>
+    <p class="timer-next" id="timer-next"></p>
+  </section>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <nav class="tabbar" aria-label="Sections">
+    <button class="tab" data-tab="train">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6.5 7v10M3.5 9.5v5M17.5 7v10M20.5 9.5v5M6.5 12h11"/></svg>
+      Train
+    </button>
+    <button class="tab" data-tab="history">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3.5 4v4h4"/><path d="M12 8v4.5l3 2"/></svg>
+      History
+    </button>
+    <button class="tab" data-tab="guide">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h5.5A2.5 2.5 0 0 1 12 7.5V20a2 2 0 0 0-2-2H4zM20 5h-5.5A2.5 2.5 0 0 0 12 7.5V20a2 2 0 0 1 2-2h6z"/></svg>
+      Guide
+    </button>
+  </nav>
+</body>
+</html>

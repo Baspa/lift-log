@@ -153,7 +153,9 @@ function sessionStats(workout, session) {
 const nextInRotation = (workoutId) => ROTATION[(ROTATION.indexOf(workoutId) + 1) % ROTATION.length];
 const isSkipped = (session) => session?.skipped === true;
 const isLogged = (session) => sessionStats(WORKOUTS[session.workoutId], session).sets > 0;
-const newestFirst = (a, b) => b.date.localeCompare(a.date) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+// Not updatedAt: editing an earlier workout would make it look newer than a later one, or than a later skip.
+const rotationTime = (session) => (isSkipped(session) ? session.skippedAt : session.startedAt) ?? session.updatedAt ?? 0;
+const newestFirst = (a, b) => b.date.localeCompare(a.date) || rotationTime(b) - rotationTime(a);
 
 // A skipped day moves the rotation on just like a trained one.
 function rotationSessions() {
@@ -552,8 +554,8 @@ function skipDay() {
   const session = todaysSession(workoutId, { create: true });
   if (isLogged(session)) return;
   session.skipped = true;
-  session.updatedAt = Date.now();
-  store.selection = { date: isoDate(), workoutId };
+  session.skippedAt = Date.now();
+  session.updatedAt = session.skippedAt;
   save();
   renderTrain();
   window.scrollTo({ top: 0 });
@@ -565,6 +567,7 @@ function undoSkip() {
   const session = todaysSession(selectedWorkoutId());
   if (!isSkipped(session)) return;
   delete session.skipped;
+  delete session.skippedAt;
   session.updatedAt = Date.now();
   if (Object.keys(session.sets).length === 0) delete store.sessions[session.key];
   save();
@@ -573,8 +576,9 @@ function undoSkip() {
 
 function deleteSession(key) {
   const session = store.sessions[key];
+  if (!session) return;
   const action = isSkipped(session) ? 'Remove the skip of' : 'Delete';
-  if (!session || !confirm(`${action} ${WORKOUTS[session.workoutId].name} from ${shortDate.format(fromIso(session.date))}?`)) return;
+  if (!confirm(`${action} ${WORKOUTS[session.workoutId].name} from ${shortDate.format(fromIso(session.date))}?`)) return;
   delete store.sessions[key];
   save();
   renderHistory();
@@ -728,7 +732,7 @@ function sanitizeSessions(raw) {
       });
     }
     const key = sessionKey(session.date, session.workoutId);
-    clean[key] = {
+    const cleanSession = {
       key,
       date: session.date,
       workoutId: session.workoutId,
@@ -736,8 +740,11 @@ function sanitizeSessions(raw) {
       startedAt: numberOrNull(session.startedAt),
       finishedAt: numberOrNull(session.finishedAt),
       updatedAt: numberOrNull(session.updatedAt) ?? 0,
-      ...(session.skipped === true && { skipped: true }),
     };
+    if (session.skipped === true && !isLogged(cleanSession)) {
+      Object.assign(cleanSession, { skipped: true, skippedAt: numberOrNull(session.skippedAt) });
+    }
+    clean[key] = cleanSession;
   }
   return clean;
 }

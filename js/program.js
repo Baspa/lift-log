@@ -7,10 +7,14 @@ const REST = {
   short: [60, 90],
 };
 
-// step: smallest realistic weight jump in kg (dumbbell pair steps, plate or pin stack increments).
-const STEP = { dumbbell: 2, stack: 2.5, barbell: 2.5, heavy: 5 };
+// Weight jump in kg to the next dumbbell, plate or pin. Uneven pin stacks are [smallest, largest] jump;
+// the app then prefers a weight you logged before within that range, else the smallest jump.
+const STEP = { dumbbell: 2, stack: 2.5, barbell: 2.5, legMachine: [5, 7], legPress: [5, 11] };
 
-const exercise = (id, name, sets, reps, step) => ({ id, name, sets, reps, step });
+const exercise = (id, name, sets, reps, step) => {
+  const [min, max = min] = [step].flat();
+  return { id, name, sets, reps, step: min, maxStep: max };
+};
 const single = (id, name, sets, reps, rest, step) => ({ rest, exercises: [exercise(id, name, sets, reps, step)] });
 const superset = (rest, ...exercises) => ({ rest, exercises });
 
@@ -38,10 +42,10 @@ export const WORKOUTS = {
     short: 'Low A',
     focus: 'Quad emphasis',
     blocks: [
-      single('squat-or-leg-press', 'Squat or leg press', 3, [6, 10], REST.heavy, STEP.heavy),
+      single('squat-or-leg-press', 'Squat or leg press', 3, [6, 10], REST.heavy, STEP.legPress),
       single('bulgarian-split-squat', 'Bulgarian split squat', 3, [8, 12], REST.twoMinutes, STEP.dumbbell),
-      single('leg-curl', 'Leg curl', 3, [10, 15], REST.ninetySeconds, STEP.stack),
-      single('leg-extension', 'Leg extension', 2, [10, 15], REST.short, STEP.stack),
+      single('leg-curl', 'Leg curl', 3, [10, 15], REST.ninetySeconds, STEP.legMachine),
+      single('leg-extension', 'Leg extension', 2, [10, 15], REST.short, STEP.legMachine),
       single('standing-calf-raise', 'Standing calf raise (dumbbells or machine)', 3, [10, 20], REST.short, STEP.stack),
       single('cable-crunch-or-abs', 'Cable crunch or another ab exercise', 2, [10, 15], REST.short, STEP.stack),
     ],
@@ -69,9 +73,9 @@ export const WORKOUTS = {
     focus: 'Hamstring emphasis',
     blocks: [
       single('romanian-deadlift', 'Romanian deadlift (barbell or dumbbells)', 3, [6, 10], REST.heavy, STEP.barbell),
-      single('leg-press', 'Leg press', 3, [10, 12], REST.twoMinutes, STEP.heavy),
-      single('leg-curl', 'Leg curl', 3, [10, 15], REST.ninetySeconds, STEP.stack),
-      single('leg-extension', 'Leg extension', 2, [12, 15], REST.short, STEP.stack),
+      single('leg-press', 'Leg press', 3, [10, 12], REST.twoMinutes, STEP.legPress),
+      single('leg-curl', 'Leg curl', 3, [10, 15], REST.ninetySeconds, STEP.legMachine),
+      single('leg-extension', 'Leg extension', 2, [12, 15], REST.short, STEP.legMachine),
       single('standing-calf-raise', 'Standing calf raise', 3, [10, 20], REST.short, STEP.stack),
       single('hanging-knee-raise-or-cable-crunch', 'Hanging knee raise or cable crunch', 2, [10, 15], REST.short, STEP.stack),
     ],

@@ -143,12 +143,18 @@ function progression(exercise, history) {
 
   const sets = Array.from({ length: exercise.sets }, (_, set) => {
     const { w, r } = previousEntry(last, set);
-    if (kind === 'up') return { w: w > 0 ? roundTo(w + exercise.step, 0.01) : w, r: low };
+    if (kind === 'up') return { w: w > 0 ? nextWeight(w, exercise, history) : w, r: low };
     if (kind === 'down') return { w: w > 0 ? Math.min(roundTo(w * 0.9, exercise.step), roundTo(w - exercise.step, 0.01)) : w, r: low };
     if (kind === 'maxed') return { w, r: high };
     return { w, r: r == null ? null : Math.min(Math.max(r + 1, low), high) };
   });
   return { kind, sets };
+}
+
+// Pin stacks jump unevenly, so reuse a weight already logged within the jump range before guessing.
+function nextWeight(w, exercise, history) {
+  const logged = history.flat().map((entry) => entry?.w).filter((value) => value > w && value <= w + exercise.maxStep);
+  return logged.length ? Math.min(...logged) : roundTo(w + exercise.step, 0.01);
 }
 
 function progressionHint(exercise, plan, prefix) {

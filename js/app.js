@@ -112,12 +112,19 @@ function writeEntry(session, exerciseId, set, patch) {
   session.updatedAt = Date.now();
 }
 
-// Done sets per earlier session for one exercise, newest session first.
+const repRangeOf = (workoutId, exerciseId) =>
+  WORKOUTS[workoutId]?.blocks.flatMap((block) => block.exercises).find((exercise) => exercise.id === exerciseId)?.reps;
+
+// Done sets per earlier session for one exercise, newest session first. Lower A and B share exercises
+// with different rep ranges, so each session keeps the range it was trained in.
 function exerciseHistory(exerciseId, excludeKey) {
   return Object.values(store.sessions)
     .filter((session) => session.key !== excludeKey && session.sets[exerciseId]?.some((entry) => entry?.done))
     .sort((a, b) => b.date.localeCompare(a.date) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-    .map((session) => session.sets[exerciseId].map((entry) => (entry?.done ? entry : null)));
+    .map((session) => ({
+      reps: repRangeOf(session.workoutId, exerciseId),
+      sets: session.sets[exerciseId].map((entry) => (entry?.done ? entry : null)),
+    }));
 }
 
 function previousEntry(previous, set) {
@@ -127,24 +134,30 @@ function previousEntry(previous, set) {
 
 const roundTo = (value, step) => Math.round(Math.round(value / step) * step * 100) / 100;
 const isWeighted = (entries) => entries.some((entry) => entry.w > 0);
-const allBelowRange = (entries, low) => entries.length > 0 && entries.every((entry) => entry.r != null && entry.r < low);
+const heaviest = (entries) => Math.max(0, ...entries.map((entry) => entry.w ?? 0));
+const allBelowRange = (entries, [low]) => entries.length > 0 && entries.every((entry) => entry.r != null && entry.r < low);
+const lighterWeight = (w, step) => Math.min(roundTo(w * 0.9, step), roundTo(w - step, 0.01));
 
 // Double progression: add reps at the same weight up to the top of the range, then add one weight step and
-// start again at the bottom. Missing the bottom of the range two sessions in a row drops the weight about 10%.
+// start again at the bottom. Missing the bottom of the range two sessions in a row at the same weight drops it about 10%.
 function progression(exercise, history) {
   const [last, before] = history;
-  const done = last?.filter(Boolean) ?? [];
+  const done = last?.sets.filter(Boolean) ?? [];
   if (!done.length) return null;
+  const doneBefore = before?.sets.filter(Boolean) ?? [];
   const [low, high] = exercise.reps;
   const weighted = isWeighted(done);
   const atTop = done.length >= exercise.sets && done.every((entry) => (entry.r ?? 0) >= high);
-  const stalled = weighted && allBelowRange(done, low) && allBelowRange(before?.filter(Boolean) ?? [], low);
+  const missedTwice = allBelowRange(done, last.reps ?? exercise.reps) && allBelowRange(doneBefore, before?.reps ?? exercise.reps);
+  const notJustDropped = heaviest(doneBefore) <= heaviest(done);
+  const canGoLighter = heaviest(done) > exercise.step;
+  const stalled = weighted && missedTwice && notJustDropped && canGoLighter;
   const kind = atTop ? (weighted ? 'up' : 'maxed') : stalled ? 'down' : 'reps';
 
   const sets = Array.from({ length: exercise.sets }, (_, set) => {
-    const { w, r } = previousEntry(last, set);
+    const { w, r } = previousEntry(last.sets, set);
     if (kind === 'up') return { w: w > 0 ? nextWeight(w, exercise, history) : w, r: low };
-    if (kind === 'down') return { w: w > 0 ? Math.min(roundTo(w * 0.9, exercise.step), roundTo(w - exercise.step, 0.01)) : w, r: low };
+    if (kind === 'down') return { w: w > exercise.step ? lighterWeight(w, exercise.step) : w, r: low };
     if (kind === 'maxed') return { w, r: high };
     return { w, r: r == null ? null : Math.min(Math.max(r + 1, low), high) };
   });
@@ -153,7 +166,7 @@ function progression(exercise, history) {
 
 // Pin stacks jump unevenly, so reuse a weight already logged within the jump range before guessing.
 function nextWeight(w, exercise, history) {
-  const logged = history.flat().map((entry) => entry?.w).filter((value) => value > w && value <= w + exercise.maxStep);
+  const logged = history.flatMap((session) => session.sets).map((entry) => entry?.w).filter((value) => value > w && value <= w + exercise.maxStep);
   return logged.length ? Math.min(...logged) : roundTo(w + exercise.step, 0.01);
 }
 
@@ -303,7 +316,7 @@ function blockCard(block, blockIndex, steps, session, next) {
     const roundLabel = isSuperset && step.position === 0 ? `<p class="round">Round ${step.set + 1}</p>` : '';
     const label = isSuperset ? `A${step.position + 1}` : `${step.set + 1}`;
     const { id } = step.exercise;
-    return roundLabel + setRow(step, label, session, history[id][0], plans[id]?.sets[step.set], step === next);
+    return roundLabel + setRow(step, label, session, history[id][0]?.sets, plans[id]?.sets[step.set], step === next);
   });
 
   const isOpen = isBlockOpen(selectedWorkoutId(), blockIndex, isDone);
@@ -460,7 +473,7 @@ function renderGuide() {
         <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum. Turn it off below.</li>
         <li>Supersets: do A1, go straight to A2, then rest.</li>
         <li>Finished exercises fold away. Tap the arrow on any exercise to show or hide it.</li>
-        <li>Targets follow double progression: one more rep per set at the same weight until every set hits the top of the range, then one weight step up and back to the bottom of the range. Missing the bottom of the range two sessions in a row drops the weight about 10%.</li>
+        <li>Targets follow double progression: one more rep per set at the same weight until every set hits the top of the range, then one weight step up and back to the bottom of the range. Missing the bottom of the range two sessions in a row at the same weight drops it about 10%.</li>
         <li>Install: in Safari tap Share → Add to Home Screen. It then runs full screen and works offline.</li>
       </ul>
     </section>

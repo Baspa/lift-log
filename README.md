@@ -8,7 +8,7 @@ A small offline web app (PWA) for the 4-day upper/lower muscle growth plan. Buil
 - Exercises are listed in order with sets, rep range and rest time.
 - Log kg and reps per set.
 - The rest timer starts on ✓. It beeps at the minimum rest and again at the maximum. Supersets skip the rest between A1 and A2.
-- Each exercise shows a target based on your history (double progression): one more rep per set at the same weight until every set hits the top of the range, then one weight step up (2 kg dumbbells, 2.5 kg stacks/barbell, 5–7 kg leg curl/extension, 5–11 kg leg press; a weight you logged before within that range wins) and back to the bottom of the range. Below the range two sessions in a row drops the weight about 10%. Targets show as the grey placeholders; ✓ with an empty field logs the target.
+- Each exercise shows a target based on your history (double progression): one more rep per set at the same weight until every set hits the top of the range, then one weight step up (2 kg dumbbells, 2.5 kg stacks/barbell, 5–7 kg leg curl/extension, 5–11 kg leg press; a weight you logged before within that range wins) and back to the bottom of the range. Below the range two sessions in a row at the same weight drops it about 10%. Targets show as the grey placeholders; ✓ with an empty field logs the target.
 
 ## Install on iPhone
 

@@ -1,6 +1,11 @@
 import { WORKOUTS, ROTATION, PLAN, GUIDELINES } from './program.js';
+import { BackupError, checkRepo, currentSha, fingerprint, readBackup, writeBackup } from './backup.js';
 
 const STORE_KEY = 'lift-log:v1';
+const BACKUP_KEY = 'lift-log:backup';
+const BACKUP_AFTER_CHANGE_MS = 2 * 60_000;
+const DEFAULT_BACKUP_REPO = 'Baspa/lift-log-data';
+const NEW_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new';
 const TABS = ['train', 'history', 'guide'];
 const STAY_AWAKE_AFTER_LAST_SET_MS = 20 * 60_000;
 const FORGET_TIMER_AFTER_S = 5 * 60;
@@ -25,6 +30,11 @@ let timerInterval = null;
 let audioContext = null;
 let wakeLock = null;
 let toastTimeout = null;
+let backupConfig = loadBackupConfig();
+let backupTimeout = null;
+let backupRun = null;
+let backupAgain = false;
+let connecting = false;
 
 function loadStore() {
   const fresh = { sessions: {}, timer: null, tab: 'train', selection: null, lastLogAt: null, settings: { restTimer: true }, folds: null };
@@ -42,6 +52,7 @@ function save() {
   } catch {
     toast('Could not save: storage is full or blocked');
   }
+  scheduleBackup();
 }
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -408,14 +419,63 @@ function renderHistory() {
     ${sessions.length
       ? `<ul class="history">${sessions.map(historyItem).join('')}</ul>`
       : '<section class="card"><p class="sub">Log your first set on the Train tab and it shows up here.</p></section>'}
+    ${backupCard()}`;
+}
+
+function backupCard() {
+  const fileActions = `
+      <div class="actions">
+        <button class="btn" data-action="export">Export</button>
+        <label class="btn">Import<input id="import-file" type="file" accept="application/json,.json" hidden></label>
+      </div>`;
+  const plainInput = 'autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"';
+
+  if (!backupConfig) {
+    return `
     <section class="card">
       <h2>Backup</h2>
-      <p class="sub">Your log is stored on this phone only. Export a backup now and then; import it on a new phone.</p>
+      <p class="sub">Your log is stored on this phone only. Back it up to a private GitHub repo automatically, or export a file now and then.</p>
+      <label class="field">Repository<input id="backup-repo" class="text-input" value="${DEFAULT_BACKUP_REPO}" ${plainInput}></label>
+      <label class="field">Access token<input id="backup-token" class="text-input" type="password" placeholder="github_pat_…" ${plainInput}></label>
+      <p class="field-hint">Make a <a href="${NEW_TOKEN_URL}" target="_blank" rel="noopener">fine-grained token</a> for only this repo, with Contents: Read and write.</p>
       <div class="actions">
-        <button class="btn btn-primary" data-action="export">Export</button>
-        <label class="btn">Import<input id="import-file" type="file" accept="application/json,.json" hidden></label>
+        <button class="btn btn-primary" data-action="backup-connect">Connect</button>
       </div>
+      ${fileActions}
     </section>`;
+  }
+
+  const { text, isError } = backupStatus();
+  return `
+    <section class="card">
+      <h2>Backup</h2>
+      <p class="backup-status${isError ? ' is-error' : ''}">${text}</p>
+      <div class="actions">
+        <button class="btn btn-primary" data-action="backup-now">Back up now</button>
+      </div>
+      ${fileActions}
+      <button class="link-danger" data-action="backup-stop">Stop backing up</button>
+    </section>`;
+}
+
+function backupStatus() {
+  const { repo, status, lastBackupAt, count } = backupConfig;
+  if (backupRun) return { text: 'Backing up…' };
+  if (status === 'error') return { text: 'Token stopped working. Stop backing up and connect with a new token.', isError: true };
+  if (status === 'paused') {
+    return { text: `Paused: this phone has far fewer workouts than the ${count} on GitHub. Stop backing up, then connect again to restore them.`, isError: true };
+  }
+  if (status === 'waiting') return { text: 'Waiting for a connection. It backs up as soon as you are online.' };
+  return { text: `Backed up to ${repo}${lastBackupAt ? ` · ${timeAgo(lastBackupAt)}` : ''}` };
+}
+
+function timeAgo(timestamp) {
+  const minutes = Math.floor((Date.now() - timestamp) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const date = new Date(timestamp);
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return isoDate(date) === isoDate() ? `today ${time}` : `${shortDate.format(date)} ${time}`;
 }
 
 function historyItem(session) {
@@ -474,6 +534,7 @@ function renderGuide() {
         <li>Supersets: do A1, go straight to A2, then rest.</li>
         <li>Finished exercises fold away. Tap the arrow on any exercise to show or hide it.</li>
         <li>Targets follow double progression: one more rep per set at the same weight until every set hits the top of the range, then one weight step up and back to the bottom of the range. Missing the bottom of the range two sessions in a row at the same weight drops it about 10%.</li>
+        <li>Backup: connect a private GitHub repo under History → Backup. The log then backs itself up after every workout.</li>
         <li>Install: in Safari tap Share → Add to Home Screen. It then runs full screen and works offline.</li>
       </ul>
     </section>
@@ -550,6 +611,7 @@ function announceNextStep(steps, session, logged) {
     stopTimer();
     releaseWakeLock();
     toast('Workout complete. Nice work!');
+    backupNow();
     return;
   }
   keepAwake();
@@ -716,8 +778,10 @@ function toast(message) {
   }, 2600);
 }
 
+const backupData = () => ({ app: 'lift-log', version: 1, sessions: store.sessions });
+
 async function exportBackup() {
-  const json = JSON.stringify({ app: 'lift-log', version: 1, exportedAt: new Date().toISOString(), sessions: store.sessions }, null, 2);
+  const json = JSON.stringify({ ...backupData(), exportedAt: new Date().toISOString() }, null, 2);
   const file = new File([json], `lift-log-${isoDate()}.json`, { type: 'application/json' });
   if (navigator.canShare?.({ files: [file] })) {
     await navigator.share({ files: [file], title: 'Lift Log backup' }).catch(() => {});
@@ -776,6 +840,168 @@ async function importBackup(input) {
   }
 }
 
+function loadBackupConfig() {
+  try {
+    return JSON.parse(localStorage.getItem(BACKUP_KEY) ?? 'null');
+  } catch {
+    return null;
+  }
+}
+
+function storeBackupConfig(config) {
+  backupConfig = config;
+  try {
+    if (config) localStorage.setItem(BACKUP_KEY, JSON.stringify(config));
+    else localStorage.removeItem(BACKUP_KEY);
+  } catch {
+    toast('Could not save the backup settings');
+  }
+  refreshBackupCard();
+}
+
+function updateBackupConfig(patch) {
+  if (backupConfig) storeBackupConfig({ ...backupConfig, ...patch });
+}
+
+// Only the status line changes during a backup; re-rendering History would collapse the workout being read.
+function refreshBackupCard() {
+  if (store.tab !== 'history') return;
+  const status = $('.backup-status');
+  if (status && backupConfig) {
+    const { text, isError } = backupStatus();
+    status.textContent = text;
+    status.classList.toggle('is-error', Boolean(isError));
+  } else if (Boolean(status) !== Boolean(backupConfig)) {
+    renderHistory();
+  }
+}
+
+const BACKUP_PROBLEMS = {
+  error: 'Backup stopped: the GitHub token no longer works. See History → Backup.',
+  paused: 'Backup paused: this phone has far fewer workouts than GitHub. See History → Backup.',
+};
+
+function announceBackupProblem() {
+  const problem = BACKUP_PROBLEMS[backupConfig?.status];
+  if (problem) toast(problem);
+}
+
+function setBackupStatus(config, status, patch = {}) {
+  if (backupConfig !== config) return;
+  const isNew = status !== config.status;
+  updateBackupConfig({ ...patch, status });
+  if (isNew) announceBackupProblem();
+}
+
+// Deleting workouts happens one at a time; a big drop means this phone lost its data, so GitHub's copy is kept.
+const looksLikeDataLoss = (count, backedUp) => (count === 0 && backedUp > 0) || backedUp - count > Math.max(3, backedUp / 2);
+
+function scheduleBackup() {
+  if (!backupConfig) return;
+  clearTimeout(backupTimeout);
+  backupTimeout = setTimeout(backupNow, BACKUP_AFTER_CHANGE_MS);
+}
+
+async function backupNow() {
+  if (!backupConfig) return;
+  if (backupRun) {
+    backupAgain = true;
+    return backupRun;
+  }
+  clearTimeout(backupTimeout);
+  backupRun = runBackup();
+  refreshBackupCard();
+  try {
+    await backupRun;
+  } finally {
+    backupRun = null;
+  }
+  refreshBackupCard();
+  if (backupAgain) {
+    backupAgain = false;
+    await backupNow();
+  }
+}
+
+const isShaConflict = (error) => error instanceof BackupError && (error.status === 409 || error.status === 422);
+const isAccessDenied = (error) => error instanceof BackupError && [401, 403, 404].includes(error.status);
+
+async function runBackup() {
+  const config = backupConfig;
+  if (config.status === 'paused') return;
+  try {
+    const json = JSON.stringify(backupData(), null, 2);
+    const count = loggedSessions().length;
+    const print = await fingerprint(json);
+    if (print === config.fingerprint) return setBackupStatus(config, 'ok');
+    if (looksLikeDataLoss(count, config.count)) return setBackupStatus(config, 'paused');
+    if (!navigator.onLine) return setBackupStatus(config, 'waiting');
+
+    const now = new Date();
+    const message = `Backup ${isoDate(now)} ${pad(now.getHours())}:${pad(now.getMinutes())} · ${count} workout${count === 1 ? '' : 's'}`;
+    let sha;
+    try {
+      sha = await writeBackup(config, json, config.sha, message);
+    } catch (error) {
+      if (!isShaConflict(error)) throw error;
+      sha = await writeBackup(config, json, await currentSha(config), message);
+    }
+    setBackupStatus(config, 'ok', { sha, fingerprint: print, count, lastBackupAt: Date.now() });
+  } catch (error) {
+    setBackupStatus(config, isAccessDenied(error) ? 'error' : 'waiting');
+  }
+}
+
+function connectError(error) {
+  if (!(error instanceof BackupError)) return 'No connection to GitHub. Try again when you are online.';
+  if (error.status === 401) return 'GitHub did not accept that token';
+  if (error.status === 403 || error.status === 404) return 'That token cannot reach the repository';
+  return `GitHub answered ${error.status}. Try again later.`;
+}
+
+async function connectBackup() {
+  if (connecting) return;
+  const repo = $('#backup-repo').value.trim();
+  const token = $('#backup-token').value.trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast('Repository should look like owner/name');
+  if (!token) return toast('Paste your access token first');
+
+  connecting = true;
+  try {
+    await checkRepo({ repo, token });
+    const saved = await readBackup({ repo, token });
+    const remote = Object.values(sanitizeSessions(saved?.sessions));
+    const restorable = remote.filter((session) => session.updatedAt > (store.sessions[session.key]?.updatedAt ?? -1));
+    if (restorable.length) {
+      const count = `${restorable.length} workout${restorable.length === 1 ? '' : 's'}`;
+      if (!confirm(`Restore ${count} from GitHub? Workouts that are newer on this phone stay as they are.`)) return toast('Not connected');
+      for (const session of restorable) store.sessions[session.key] = session;
+      save();
+      render();
+    }
+    const sha = saved ? await currentSha({ repo, token }) : null;
+    storeBackupConfig({ repo, token, sha, fingerprint: null, count: remote.length, lastBackupAt: null, status: 'ok' });
+    toast(restorable.length ? 'Restored and connected' : 'Connected');
+    backupNow();
+  } catch (error) {
+    toast(connectError(error));
+  } finally {
+    connecting = false;
+  }
+}
+
+async function backUpManually() {
+  await backupNow();
+  if (backupConfig?.status === 'ok') toast('Backup is up to date');
+}
+
+function stopBackup() {
+  if (!confirm('Stop backing up to GitHub? Your backups stay in the repository; this phone forgets the token.')) return;
+  clearTimeout(backupTimeout);
+  storeBackupConfig(null);
+  toast('Backup stopped');
+}
+
 document.addEventListener('click', (event) => {
   const button = event.target.closest('button');
   if (!button) return;
@@ -789,6 +1015,9 @@ document.addEventListener('click', (event) => {
     'timer-skip': stopTimer,
     'delete-session': () => deleteSession(button.dataset.key),
     export: exportBackup,
+    'backup-connect': connectBackup,
+    'backup-now': backUpManually,
+    'backup-stop': stopBackup,
   };
   actions[button.dataset.action]?.();
 });
@@ -813,15 +1042,21 @@ document.addEventListener('focusout', () => {
   });
 });
 
+// Also on hide: iOS may suspend the app before the request finishes, but often it gets through.
 document.addEventListener('visibilitychange', () => {
+  backupNow();
   if (document.visibilityState !== 'visible') return;
   if (renderedForDate !== isoDate()) render();
   if (store.timer) tickTimer();
   if (store.lastLogAt && Date.now() - store.lastLogAt < STAY_AWAKE_AFTER_LAST_SET_MS) keepAwake();
 });
 
+window.addEventListener('online', backupNow);
+
 render();
 if (store.timer) showTimer();
+announceBackupProblem();
+backupNow();
 if ('serviceWorker' in navigator) {
   const isUpdate = Boolean(navigator.serviceWorker.controller);
   navigator.serviceWorker.addEventListener('controllerchange', () => {

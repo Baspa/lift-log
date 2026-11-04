@@ -23,7 +23,7 @@ Everything is stored in the browser's `localStorage` on the phone. Use **History
 The app can back up your log to a private GitHub repo by itself. It does this after every workout, two minutes after a change, and when you open or leave the app. Each backup replaces `history.json` in the repo, and the commit history keeps every older version. If you're offline, it waits and tries again later.
 
 1. Open https://github.com/settings/personal-access-tokens/new.
-2. Name the token "Lift Log" and pick an expiry.
+2. Name the token "Lift Log" and pick a long expiry. The default is 30 days, and backups stop when it runs out.
 3. Under **Repository access**, choose **Only select repositories** → `Baspa/lift-log-data`.
 4. Under **Repository permissions**, set **Contents** to **Read and write**.
 5. Generate the token, then paste it in Lift Log under **History → Backup** and tap **Connect**.

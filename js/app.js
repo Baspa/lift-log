@@ -463,7 +463,7 @@ function backupStatus() {
   if (backupRun) return { text: 'Backing up…' };
   if (status === 'error') return { text: 'Token stopped working. Stop backing up and connect with a new token.', isError: true };
   if (status === 'paused') {
-    return { text: `Paused: this phone has no workouts but GitHub has ${count}. Stop backing up, then connect again to restore them.`, isError: true };
+    return { text: `Paused: this phone has far fewer workouts than the ${count} on GitHub. Stop backing up, then connect again to restore them.`, isError: true };
   }
   if (status === 'waiting') return { text: 'Waiting for a connection. It backs up as soon as you are online.' };
   return { text: `Backed up to ${repo}${lastBackupAt ? ` · ${timeAgo(lastBackupAt)}` : ''}` };
@@ -863,9 +863,38 @@ function updateBackupConfig(patch) {
   if (backupConfig) storeBackupConfig({ ...backupConfig, ...patch });
 }
 
+// Only the status line changes during a backup; re-rendering History would collapse the workout being read.
 function refreshBackupCard() {
-  if (store.tab === 'history') renderHistory();
+  if (store.tab !== 'history') return;
+  const status = $('.backup-status');
+  if (status && backupConfig) {
+    const { text, isError } = backupStatus();
+    status.textContent = text;
+    status.classList.toggle('is-error', Boolean(isError));
+  } else if (Boolean(status) !== Boolean(backupConfig)) {
+    renderHistory();
+  }
 }
+
+const BACKUP_PROBLEMS = {
+  error: 'Backup stopped: the GitHub token no longer works. See History → Backup.',
+  paused: 'Backup paused: this phone has far fewer workouts than GitHub. See History → Backup.',
+};
+
+function announceBackupProblem() {
+  const problem = BACKUP_PROBLEMS[backupConfig?.status];
+  if (problem) toast(problem);
+}
+
+function setBackupStatus(config, status, patch = {}) {
+  if (backupConfig !== config) return;
+  const isNew = status !== config.status;
+  updateBackupConfig({ ...patch, status });
+  if (isNew) announceBackupProblem();
+}
+
+// Deleting workouts happens one at a time; a big drop means this phone lost its data, so GitHub's copy is kept.
+const looksLikeDataLoss = (count, backedUp) => (count === 0 && backedUp > 0) || backedUp - count > Math.max(3, backedUp / 2);
 
 function scheduleBackup() {
   if (!backupConfig) return;
@@ -882,8 +911,11 @@ async function backupNow() {
   clearTimeout(backupTimeout);
   backupRun = runBackup();
   refreshBackupCard();
-  await backupRun;
-  backupRun = null;
+  try {
+    await backupRun;
+  } finally {
+    backupRun = null;
+  }
   refreshBackupCard();
   if (backupAgain) {
     backupAgain = false;
@@ -896,13 +928,14 @@ const isAccessDenied = (error) => error instanceof BackupError && [401, 403, 404
 
 async function runBackup() {
   const config = backupConfig;
+  if (config.status === 'paused') return;
   try {
     const json = JSON.stringify(backupData(), null, 2);
     const count = loggedSessions().length;
     const print = await fingerprint(json);
-    if (print === config.fingerprint) return updateBackupConfig({ status: 'ok' });
-    if (!count && config.count > 0) return updateBackupConfig({ status: 'paused' });
-    if (!navigator.onLine) return updateBackupConfig({ status: 'waiting' });
+    if (print === config.fingerprint) return setBackupStatus(config, 'ok');
+    if (looksLikeDataLoss(count, config.count)) return setBackupStatus(config, 'paused');
+    if (!navigator.onLine) return setBackupStatus(config, 'waiting');
 
     const now = new Date();
     const message = `Backup ${isoDate(now)} ${pad(now.getHours())}:${pad(now.getMinutes())} · ${count} workout${count === 1 ? '' : 's'}`;
@@ -913,9 +946,9 @@ async function runBackup() {
       if (!isShaConflict(error)) throw error;
       sha = await writeBackup(config, json, await currentSha(config), message);
     }
-    if (backupConfig === config) updateBackupConfig({ sha, fingerprint: print, count, lastBackupAt: Date.now(), status: 'ok' });
+    setBackupStatus(config, 'ok', { sha, fingerprint: print, count, lastBackupAt: Date.now() });
   } catch (error) {
-    if (backupConfig === config) updateBackupConfig({ status: isAccessDenied(error) ? 'error' : 'waiting' });
+    setBackupStatus(config, isAccessDenied(error) ? 'error' : 'waiting');
   }
 }
 
@@ -1022,6 +1055,7 @@ window.addEventListener('online', backupNow);
 
 render();
 if (store.timer) showTimer();
+announceBackupProblem();
 backupNow();
 if ('serviceWorker' in navigator) {
   const isUpdate = Boolean(navigator.serviceWorker.controller);

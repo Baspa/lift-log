@@ -1,6 +1,7 @@
 const API = 'https://api.github.com';
 const DEFAULT_PATH = 'history.json';
 const BASE64_CHUNK_BYTES = 0x8000;
+const REQUEST_TIMEOUT_MS = 30_000;
 
 export class BackupError extends Error {
   constructor(status) {
@@ -13,10 +14,13 @@ const pathOf = (config) => config.path ?? DEFAULT_PATH;
 const isNotFound = (error) => error instanceof BackupError && error.status === 404;
 
 async function request({ token }, path, { accept = 'application/vnd.github+json', ...init } = {}) {
-  // GitHub marks API responses cacheable for 60 s; a cached sha would make the next write conflict.
-  const response = await fetch(`${API}${path}`, {
+  // GitHub lets browsers cache answers for 60 s and a stale sha makes the next write conflict. A unique query
+  // skips that cache; cache: 'no-store' could add Cache-Control/Pragma headers, which GitHub's CORS rules refuse.
+  const isRead = !init.method;
+  const response = await fetch(`${API}${path}${isRead ? `?fresh=${Date.now()}` : ''}`, {
     ...init,
-    cache: 'no-store',
+    // iOS can suspend the app mid-request and leave it hanging; without a timeout no backup runs again.
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     headers: { Authorization: `Bearer ${token}`, Accept: accept, 'X-GitHub-Api-Version': '2022-11-28' },
   });
   if (!response.ok) throw new BackupError(response.status);

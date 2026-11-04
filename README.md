@@ -5,6 +5,7 @@ A small offline web app (PWA) for the 4-day upper/lower muscle growth plan. Buil
 **Live:** https://baspa.github.io/lift-log/
 
 - Pick the training day (Day 1–4). The app suggests the next one in the rotation.
+- Can't make it? **Skip this day** moves the rotation on to the next day. Skips show in History and can be undone.
 - Exercises are listed in order with sets, rep range and rest time.
 - Log kg and reps per set. Tap ✓ with an empty field to copy last session's value.
 - The rest timer starts on ✓. It beeps at the minimum rest and again at the maximum. Supersets skip the rest between A1 and A2.

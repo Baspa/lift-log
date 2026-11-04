@@ -178,6 +178,22 @@ body.has-timer .view {
   background: var(--accent-ink);
 }
 
+.day.is-skipped::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  right: 5px;
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--muted);
+}
+
+.day.is-selected.is-skipped::after {
+  background: var(--accent-ink);
+  opacity: 0.65;
+}
+
 /* Headers */
 
 .hero,
@@ -233,11 +249,29 @@ h1 {
   transition: width 0.3s ease;
 }
 
-.progress-label {
+.progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-top: 6px;
+}
+
+.progress-label {
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   color: var(--muted);
+}
+
+/* Negative margins keep a finger-sized tap area without making the row taller. */
+.link-skip {
+  margin: -12px -8px;
+  padding: 12px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .note {
@@ -573,6 +607,10 @@ h1 {
   border: 1px solid var(--accent-line);
 }
 
+.skipped-card {
+  margin-top: 16px;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -688,6 +726,10 @@ h1 {
 .pill.is-complete {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.pill.is-skipped {
+  color: var(--muted);
 }
 
 .history-body {

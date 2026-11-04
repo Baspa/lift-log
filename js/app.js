@@ -151,15 +151,21 @@ function sessionStats(workout, session) {
 }
 
 const nextInRotation = (workoutId) => ROTATION[(ROTATION.indexOf(workoutId) + 1) % ROTATION.length];
+const isSkipped = (session) => session?.skipped === true;
+const isLogged = (session) => sessionStats(WORKOUTS[session.workoutId], session).sets > 0;
+const newestFirst = (a, b) => b.date.localeCompare(a.date) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
 
-function loggedSessions() {
+// A skipped day moves the rotation on just like a trained one.
+function rotationSessions() {
   return Object.values(store.sessions)
-    .filter((session) => WORKOUTS[session.workoutId] && sessionStats(WORKOUTS[session.workoutId], session).sets > 0)
-    .sort((a, b) => b.date.localeCompare(a.date) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    .filter((session) => WORKOUTS[session.workoutId] && (isSkipped(session) || isLogged(session)))
+    .sort(newestFirst);
 }
 
+const loggedSessions = () => rotationSessions().filter((session) => !isSkipped(session));
+
 function suggestedWorkoutId() {
-  const [latest] = loggedSessions();
+  const [latest] = rotationSessions();
   if (!latest) return ROTATION[0];
   return latest.date === isoDate() ? latest.workoutId : nextInRotation(latest.workoutId);
 }
@@ -194,7 +200,7 @@ function dayPicker(selectedId) {
     const workout = WORKOUTS[workoutId];
     const session = todaysSession(workoutId);
     const { sets } = session ? sessionStats(workout, session) : { sets: 0 };
-    const status = sets === 0 ? null : sets === stepsOf(workout).length ? 'is-done' : 'is-partial';
+    const status = isSkipped(session) ? 'is-skipped' : sets === 0 ? null : sets === stepsOf(workout).length ? 'is-done' : 'is-partial';
     const classes = ['day', workoutId === selectedId && 'is-selected', status].filter(Boolean).join(' ');
     return `<button class="${classes}" data-workout="${workoutId}" aria-pressed="${workoutId === selectedId}">
       <span class="day-name">Day ${dayNumber(workoutId)}</span>
@@ -213,17 +219,25 @@ function workoutView(workoutId) {
   const exerciseCount = workout.blocks.reduce((count, block) => count + block.exercises.length, 0);
   const lastDone = lastDoneBeforeToday(workoutId);
   const eyebrow = `Day ${dayNumber(workoutId)} · ${lastDone ? `last done ${shortDate.format(fromIso(lastDone.date))}` : 'first session'}`;
-
-  return `
+  const hero = `
     <header class="hero">
       <p class="eyebrow">${eyebrow}</p>
       <h1>${workout.name}</h1>
       <p class="sub">${[workout.focus, `${exerciseCount} exercises`, PLAN.sessionLength].map((part) => `<span class="nowrap">${part}</span>`).join(' · ')}</p>
+      ${isSkipped(session) ? '' : `
       <div class="progress" role="progressbar" aria-label="Sets done" aria-valuemin="0" aria-valuemax="${steps.length}" aria-valuenow="${done}">
         <span style="width:${(done / steps.length) * 100}%"></span>
       </div>
-      <p class="progress-label">${done === steps.length ? 'All sets done' : `${done} of ${steps.length} sets`}</p>
-    </header>
+      <div class="progress-row">
+        <p class="progress-label">${done === steps.length ? 'All sets done' : `${done} of ${steps.length} sets`}</p>
+        ${done === 0 ? '<button class="link-skip" data-action="skip-day">Skip this day</button>' : ''}
+      </div>`}
+    </header>`;
+
+  if (isSkipped(session)) return hero + skippedCard(workoutId);
+
+  return `
+    ${hero}
     ${done === 0 ? '<p class="note"><strong>Warm up first:</strong> 5–7 min easy cardio or mobility, then 2–3 lighter sets before the first lift. Don’t log warm-up sets.</p>' : ''}
     <ol class="blocks">${workout.blocks.map((block, index) => blockCard(block, index, steps, session, next)).join('')}</ol>
     ${done === steps.length ? doneCard(workout, session) : ''}
@@ -321,9 +335,25 @@ function doneCard(workout, session) {
     </section>`;
 }
 
+function skippedCard(workoutId) {
+  const next = nextInRotation(workoutId);
+  return `
+    <section class="card skipped-card">
+      <p class="eyebrow">Skipped today</p>
+      <h2>Next up: Day ${dayNumber(next)} · ${WORKOUTS[next].name}</h2>
+      <p class="sub">Made it after all? Undo the skip to log this workout.</p>
+      <div class="actions"><button class="btn" data-action="undo-skip">Undo skip</button></div>
+    </section>`;
+}
+
 function renderHistory() {
-  const sessions = loggedSessions();
-  const summary = sessions.length ? `${sessions.length} workout${sessions.length === 1 ? '' : 's'} logged` : 'Nothing logged yet';
+  const sessions = rotationSessions();
+  const logged = sessions.filter((session) => !isSkipped(session)).length;
+  const skipped = sessions.length - logged;
+  const summary = [
+    logged ? `${logged} workout${logged === 1 ? '' : 's'} logged` : 'Nothing logged yet',
+    skipped && `${skipped} skipped`,
+  ].filter(Boolean).join(' · ');
 
   $('#view-history').innerHTML = `
     <header class="page-head">
@@ -332,7 +362,7 @@ function renderHistory() {
       <p class="sub">${summary}</p>
     </header>
     ${sessions.length
-      ? `<ul class="history">${sessions.map(historyItem).join('')}</ul>`
+      ? `<ul class="history">${sessions.map((session) => (isSkipped(session) ? skippedItem(session) : historyItem(session))).join('')}</ul>`
       : '<section class="card"><p class="sub">Log your first set on the Train tab and it shows up here.</p></section>'}
     <section class="card">
       <h2>Backup</h2>
@@ -371,6 +401,21 @@ function historyItem(session) {
     </li>`;
 }
 
+function skippedItem(session) {
+  return `
+    <li>
+      <details>
+        <summary>
+          <span><strong>${WORKOUTS[session.workoutId].name}</strong><small>${shortDate.format(fromIso(session.date))}</small></span>
+          <span class="pill is-skipped">Skipped</span>
+        </summary>
+        <div class="history-body">
+          <button class="link-danger" data-action="delete-session" data-key="${session.key}">Remove this skip</button>
+        </div>
+      </details>
+    </li>`;
+}
+
 function renderGuide() {
   const schedule = ROTATION.map((workoutId) => `
     <li><span>Day ${dayNumber(workoutId)}</span><strong>${WORKOUTS[workoutId].name} <small>${WORKOUTS[workoutId].focus}</small></strong></li>`).join('');
@@ -395,6 +440,7 @@ function renderGuide() {
       <h2>Using the app</h2>
       <ul class="howto">
         <li>Train opens the next day in the rotation. Doing a different one? Tap Day 1–4 at the top.</li>
+        <li>Can’t make it? Tap <em>Skip this day</em> and the rotation moves on to the next day.</li>
         <li>Exercises are listed in order. Enter kg and reps, then tap ✓. An empty field copies last time’s value.</li>
         <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum.</li>
         <li>Supersets: do A1, go straight to A2, then rest.</li>
@@ -501,9 +547,34 @@ function resetSession() {
   renderTrain();
 }
 
+function skipDay() {
+  const workoutId = selectedWorkoutId();
+  const session = todaysSession(workoutId, { create: true });
+  if (isLogged(session)) return;
+  session.skipped = true;
+  session.updatedAt = Date.now();
+  store.selection = { date: isoDate(), workoutId };
+  save();
+  renderTrain();
+  window.scrollTo({ top: 0 });
+  const next = nextInRotation(workoutId);
+  toast(`Day ${dayNumber(workoutId)} skipped. Next up: Day ${dayNumber(next)}`);
+}
+
+function undoSkip() {
+  const session = todaysSession(selectedWorkoutId());
+  if (!isSkipped(session)) return;
+  delete session.skipped;
+  session.updatedAt = Date.now();
+  if (Object.keys(session.sets).length === 0) delete store.sessions[session.key];
+  save();
+  renderTrain();
+}
+
 function deleteSession(key) {
   const session = store.sessions[key];
-  if (!session || !confirm(`Delete ${WORKOUTS[session.workoutId].name} from ${shortDate.format(fromIso(session.date))}?`)) return;
+  const action = isSkipped(session) ? 'Remove the skip of' : 'Delete';
+  if (!session || !confirm(`${action} ${WORKOUTS[session.workoutId].name} from ${shortDate.format(fromIso(session.date))}?`)) return;
   delete store.sessions[key];
   save();
   renderHistory();
@@ -665,6 +736,7 @@ function sanitizeSessions(raw) {
       startedAt: numberOrNull(session.startedAt),
       finishedAt: numberOrNull(session.finishedAt),
       updatedAt: numberOrNull(session.updatedAt) ?? 0,
+      ...(session.skipped === true && { skipped: true }),
     };
   }
   return clean;
@@ -696,6 +768,8 @@ document.addEventListener('click', (event) => {
   const actions = {
     'toggle-set': () => toggleSet(button.closest('.set')),
     'reset-session': resetSession,
+    'skip-day': skipDay,
+    'undo-skip': undoSkip,
     'timer-adjust': () => adjustTimer(Number(button.dataset.seconds)),
     'timer-skip': stopTimer,
     'delete-session': () => deleteSession(button.dataset.key),

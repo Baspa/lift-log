@@ -11,6 +11,8 @@ const ICONS = {
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>',
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
+  down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>',
+  target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="0.6" fill="currentColor"/></svg>',
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -110,14 +112,12 @@ function writeEntry(session, exerciseId, set, patch) {
   session.updatedAt = Date.now();
 }
 
-function previousSets(exerciseId, excludeKey) {
-  let latest = null;
-  for (const session of Object.values(store.sessions)) {
-    if (session.key === excludeKey || !session.sets[exerciseId]?.some((entry) => entry?.done)) continue;
-    const isNewer = !latest || session.date > latest.date || (session.date === latest.date && session.updatedAt > latest.updatedAt);
-    if (isNewer) latest = session;
-  }
-  return latest ? latest.sets[exerciseId].map((entry) => (entry?.done ? entry : null)) : null;
+// Done sets per earlier session for one exercise, newest session first.
+function exerciseHistory(exerciseId, excludeKey) {
+  return Object.values(store.sessions)
+    .filter((session) => session.key !== excludeKey && session.sets[exerciseId]?.some((entry) => entry?.done))
+    .sort((a, b) => b.date.localeCompare(a.date) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+    .map((session) => session.sets[exerciseId].map((entry) => (entry?.done ? entry : null)));
 }
 
 function previousEntry(previous, set) {
@@ -125,9 +125,45 @@ function previousEntry(previous, set) {
   return previous[set] ?? previous.filter(Boolean).at(-1) ?? null;
 }
 
-function shouldAddWeight(exercise, previous) {
-  const done = previous?.filter(Boolean) ?? [];
-  return done.length >= exercise.sets && done.every((entry) => (entry.r ?? 0) >= exercise.reps[1]);
+const roundTo = (value, step) => Math.round(Math.round(value / step) * step * 100) / 100;
+const isWeighted = (entries) => entries.some((entry) => entry.w > 0);
+const allBelowRange = (entries, low) => entries.length > 0 && entries.every((entry) => entry.r != null && entry.r < low);
+
+// Double progression: add reps at the same weight up to the top of the range, then add one weight step and
+// start again at the bottom. Missing the bottom of the range two sessions in a row drops the weight about 10%.
+function progression(exercise, history) {
+  const [last, before] = history;
+  const done = last?.filter(Boolean) ?? [];
+  if (!done.length) return null;
+  const [low, high] = exercise.reps;
+  const weighted = isWeighted(done);
+  const atTop = done.length >= exercise.sets && done.every((entry) => (entry.r ?? 0) >= high);
+  const stalled = weighted && allBelowRange(done, low) && allBelowRange(before?.filter(Boolean) ?? [], low);
+  const kind = atTop ? (weighted ? 'up' : 'maxed') : stalled ? 'down' : 'reps';
+
+  const sets = Array.from({ length: exercise.sets }, (_, set) => {
+    const { w, r } = previousEntry(last, set);
+    if (kind === 'up') return { w: w > 0 ? roundTo(w + exercise.step, 0.01) : w, r: low };
+    if (kind === 'down') return { w: w > 0 ? Math.min(roundTo(w * 0.9, exercise.step), roundTo(w - exercise.step, 0.01)) : w, r: low };
+    if (kind === 'maxed') return { w, r: high };
+    return { w, r: r == null ? null : Math.min(Math.max(r + 1, low), high) };
+  });
+  return { kind, sets };
+}
+
+function progressionHint(exercise, plan, prefix) {
+  const weights = [...new Set(plan.sets.map((set) => set.w).filter((w) => w > 0))];
+  const weightText = weights.length === 1 ? `${formatNumber(weights[0])} kg` : 'the next weight step';
+  const [low, high] = exercise.reps;
+  const text = {
+    up: `top of the range on every set last time. Go to ${weightText} and aim for ${low}+ reps.`,
+    down: `below ${low} reps two sessions in a row. Drop to ${weightText} and build back up.`,
+    maxed: 'top of the range on every set. Add weight or pick a harder variation.',
+    reps: `same weight, aim for one more rep per set (up to ${high}).`,
+  }[plan.kind];
+  const sentence = prefix ? `${prefix}: ${text}` : text[0].toUpperCase() + text.slice(1);
+  const icon = plan.kind === 'down' ? ICONS.down : plan.kind === 'reps' ? ICONS.target : ICONS.up;
+  return `<p class="hint hint-${plan.kind}">${icon}<span>${sentence}</span></p>`;
 }
 
 function nextOpenStep(steps, session) {
@@ -249,17 +285,19 @@ function blockCard(block, blockIndex, steps, session, next) {
   const isSuperset = block.exercises.length > 1;
   const isDone = blockSteps.every((step) => isStepDone(session, step));
   const isCurrent = next?.blockIndex === blockIndex;
-  const previous = Object.fromEntries(block.exercises.map((exercise) => [exercise.id, previousSets(exercise.id, session?.key)]));
+  const history = Object.fromEntries(block.exercises.map((exercise) => [exercise.id, exerciseHistory(exercise.id, session?.key)]));
+  const plans = Object.fromEntries(block.exercises.map((exercise) => [exercise.id, progression(exercise, history[exercise.id])]));
 
   const hints = block.exercises
-    .filter((exercise) => shouldAddWeight(exercise, previous[exercise.id]))
-    .map((exercise) => `<p class="hint">${ICONS.up}<span>${isSuperset ? `${exercise.name}: top` : 'Top'} of the range on every set last time. Add a little weight.</span></p>`)
+    .filter((exercise) => plans[exercise.id])
+    .map((exercise) => progressionHint(exercise, plans[exercise.id], isSuperset ? exercise.name : null))
     .join('');
 
   const rows = blockSteps.map((step) => {
     const roundLabel = isSuperset && step.position === 0 ? `<p class="round">Round ${step.set + 1}</p>` : '';
     const label = isSuperset ? `A${step.position + 1}` : `${step.set + 1}`;
-    return roundLabel + setRow(step, label, session, previous[step.exercise.id], step === next);
+    const { id } = step.exercise;
+    return roundLabel + setRow(step, label, session, history[id][0], plans[id]?.sets[step.set], step === next);
   });
 
   const isOpen = isBlockOpen(selectedWorkoutId(), blockIndex, isDone);
@@ -303,7 +341,7 @@ function supersetTitle({ exercises, rest }) {
     </p>`;
 }
 
-function setRow(step, label, session, previous, isNext) {
+function setRow(step, label, session, previous, target, isNext) {
   const { exercise, set } = step;
   const entry = entryOf(session, exercise.id, set);
   const last = previousEntry(previous, set);
@@ -314,9 +352,9 @@ function setRow(step, label, session, previous, isNext) {
       <span class="set-label">${label}</span>
       <span class="set-prev">${last ? formatEntry(last) : '—'}</span>
       <input class="set-input" data-field="w" inputmode="decimal" enterkeyhint="next" autocomplete="off" aria-label="${what}: weight in kg"
-        placeholder="${last?.w != null ? formatNumber(last.w) : 'kg'}" value="${entry?.w != null ? formatNumber(entry.w) : ''}">
+        placeholder="${target?.w != null ? formatNumber(target.w) : 'kg'}" value="${entry?.w != null ? formatNumber(entry.w) : ''}">
       <input class="set-input" data-field="r" inputmode="numeric" pattern="[0-9]*" enterkeyhint="done" autocomplete="off" aria-label="${what}: reps"
-        placeholder="${last?.r ?? formatRange(exercise.reps)}" value="${entry?.r ?? ''}">
+        placeholder="${target?.r ?? formatRange(exercise.reps)}" value="${entry?.r ?? ''}">
       <button class="check" data-action="toggle-set" aria-pressed="${Boolean(entry?.done)}" aria-label="${what} done">${ICONS.check}</button>
     </div>`;
 }
@@ -412,11 +450,11 @@ function renderGuide() {
       <h2>Using the app</h2>
       <ul class="howto">
         <li>Train opens the next day in the rotation. Doing a different one? Tap Day 1–4 at the top.</li>
-        <li>Exercises are listed in order. Enter kg and reps, then tap ✓. An empty field copies last time’s value.</li>
+        <li>Exercises are listed in order. Enter kg and reps, then tap ✓. The grey numbers are today’s target; an empty field logs the target.</li>
         <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum. Turn it off below.</li>
         <li>Supersets: do A1, go straight to A2, then rest.</li>
         <li>Finished exercises fold away. Tap the arrow on any exercise to show or hide it.</li>
-        <li><em>Add a little weight</em> shows up when you hit the top of the rep range on every set last time.</li>
+        <li>Targets follow double progression: one more rep per set at the same weight until every set hits the top of the range, then one weight step up and back to the bottom of the range. Missing the bottom of the range two sessions in a row drops the weight about 10%.</li>
         <li>Install: in Safari tap Share → Add to Home Screen. It then runs full screen and works offline.</li>
       </ul>
     </section>
@@ -468,18 +506,17 @@ function toggleSet(row) {
     return;
   }
 
-  const last = previousEntry(previousSets(exerciseId, session.key), set);
+  const steps = stepsOf(workout);
+  const logged = steps.find((step) => step.exercise.id === exerciseId && step.set === set);
+  const target = progression(logged.exercise, exerciseHistory(exerciseId, session.key))?.sets[set];
   writeEntry(session, exerciseId, set, {
-    w: entry?.w ?? last?.w ?? null,
-    r: entry?.r ?? last?.r ?? null,
+    w: entry?.w ?? target?.w ?? null,
+    r: entry?.r ?? target?.r ?? null,
     done: true,
     doneAt: Date.now(),
   });
   session.startedAt ??= Date.now();
   store.lastLogAt = Date.now();
-
-  const steps = stepsOf(workout);
-  const logged = steps.find((step) => step.exercise.id === exerciseId && step.set === set);
   announceNextStep(steps, session, logged);
   save();
   renderTrain();

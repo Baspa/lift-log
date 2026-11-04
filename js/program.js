@@ -7,8 +7,11 @@ const REST = {
   short: [60, 90],
 };
 
-const exercise = (id, name, sets, reps) => ({ id, name, sets, reps });
-const single = (id, name, sets, reps, rest) => ({ rest, exercises: [exercise(id, name, sets, reps)] });
+// step: smallest realistic weight jump in kg (dumbbell pair steps, plate or pin stack increments).
+const STEP = { dumbbell: 2, stack: 2.5, barbell: 2.5, heavy: 5 };
+
+const exercise = (id, name, sets, reps, step) => ({ id, name, sets, reps, step });
+const single = (id, name, sets, reps, rest, step) => ({ rest, exercises: [exercise(id, name, sets, reps, step)] });
 const superset = (rest, ...exercises) => ({ rest, exercises });
 
 // Exercises shared by both lower days use the same id, so last session's weight carries over between them.
@@ -18,15 +21,15 @@ export const WORKOUTS = {
     short: 'Up A',
     focus: 'Chest, back, shoulders & arms',
     blocks: [
-      single('db-chest-press', 'Dumbbell chest press', 3, [6, 10], REST.heavy),
-      single('seated-cable-row', 'Seated cable row', 3, [8, 12], REST.twoMinutes),
-      single('pullup-or-lat-pulldown', 'Pull-up or lat pulldown', 3, [6, 10], REST.twoMinutes),
-      single('db-shoulder-press', 'Dumbbell shoulder press', 2, [8, 12], REST.twoMinutes),
-      single('db-lateral-raise', 'Dumbbell lateral raise', 2, [12, 20], REST.short),
+      single('db-chest-press', 'Dumbbell chest press', 3, [6, 10], REST.heavy, STEP.dumbbell),
+      single('seated-cable-row', 'Seated cable row', 3, [8, 12], REST.twoMinutes, STEP.stack),
+      single('pullup-or-lat-pulldown', 'Pull-up or lat pulldown', 3, [6, 10], REST.twoMinutes, STEP.stack),
+      single('db-shoulder-press', 'Dumbbell shoulder press', 2, [8, 12], REST.twoMinutes, STEP.dumbbell),
+      single('db-lateral-raise', 'Dumbbell lateral raise', 2, [12, 20], REST.short, STEP.dumbbell),
       superset(
         REST.short,
-        exercise('db-bicep-curl', 'Dumbbell bicep curl', 2, [10, 15]),
-        exercise('rope-triceps-extension', 'Rope triceps extension', 2, [10, 15]),
+        exercise('db-bicep-curl', 'Dumbbell bicep curl', 2, [10, 15], STEP.dumbbell),
+        exercise('rope-triceps-extension', 'Rope triceps extension', 2, [10, 15], STEP.stack),
       ),
     ],
   },
@@ -35,12 +38,12 @@ export const WORKOUTS = {
     short: 'Low A',
     focus: 'Quad emphasis',
     blocks: [
-      single('squat-or-leg-press', 'Squat or leg press', 3, [6, 10], REST.heavy),
-      single('bulgarian-split-squat', 'Bulgarian split squat', 3, [8, 12], REST.twoMinutes),
-      single('leg-curl', 'Leg curl', 3, [10, 15], REST.ninetySeconds),
-      single('leg-extension', 'Leg extension', 2, [10, 15], REST.short),
-      single('standing-calf-raise', 'Standing calf raise (dumbbells or machine)', 3, [10, 20], REST.short),
-      single('cable-crunch-or-abs', 'Cable crunch or another ab exercise', 2, [10, 15], REST.short),
+      single('squat-or-leg-press', 'Squat or leg press', 3, [6, 10], REST.heavy, STEP.heavy),
+      single('bulgarian-split-squat', 'Bulgarian split squat', 3, [8, 12], REST.twoMinutes, STEP.dumbbell),
+      single('leg-curl', 'Leg curl', 3, [10, 15], REST.ninetySeconds, STEP.stack),
+      single('leg-extension', 'Leg extension', 2, [10, 15], REST.short, STEP.stack),
+      single('standing-calf-raise', 'Standing calf raise (dumbbells or machine)', 3, [10, 20], REST.short, STEP.stack),
+      single('cable-crunch-or-abs', 'Cable crunch or another ab exercise', 2, [10, 15], REST.short, STEP.stack),
     ],
   },
   upperB: {
@@ -48,15 +51,15 @@ export const WORKOUTS = {
     short: 'Up B',
     focus: 'Chest, back, shoulders & arms',
     blocks: [
-      single('incline-db-chest-press', 'Incline dumbbell chest press', 3, [8, 12], REST.heavy),
-      single('barbell-or-chest-supported-row', 'Barbell row or chest-supported row', 3, [8, 12], REST.twoMinutes),
-      single('lat-pulldown', 'Lat pulldown', 3, [8, 12], REST.twoMinutes),
-      single('cable-or-db-lateral-raise', 'Cable or dumbbell lateral raise', 3, [12, 20], REST.short),
-      single('rear-delt-fly', 'Rear-delt fly (dumbbells or cable)', 2, [12, 20], REST.short),
+      single('incline-db-chest-press', 'Incline dumbbell chest press', 3, [8, 12], REST.heavy, STEP.dumbbell),
+      single('barbell-or-chest-supported-row', 'Barbell row or chest-supported row', 3, [8, 12], REST.twoMinutes, STEP.barbell),
+      single('lat-pulldown', 'Lat pulldown', 3, [8, 12], REST.twoMinutes, STEP.stack),
+      single('cable-or-db-lateral-raise', 'Cable or dumbbell lateral raise', 3, [12, 20], REST.short, STEP.dumbbell),
+      single('rear-delt-fly', 'Rear-delt fly (dumbbells or cable)', 2, [12, 20], REST.short, STEP.dumbbell),
       superset(
         REST.short,
-        exercise('barbell-bicep-curl', 'Barbell bicep curl', 2, [8, 12]),
-        exercise('db-skull-crusher', 'Dumbbell skull crushers', 2, [10, 15]),
+        exercise('barbell-bicep-curl', 'Barbell bicep curl', 2, [8, 12], STEP.barbell),
+        exercise('db-skull-crusher', 'Dumbbell skull crushers', 2, [10, 15], STEP.dumbbell),
       ),
     ],
   },
@@ -65,12 +68,12 @@ export const WORKOUTS = {
     short: 'Low B',
     focus: 'Hamstring emphasis',
     blocks: [
-      single('romanian-deadlift', 'Romanian deadlift (barbell or dumbbells)', 3, [6, 10], REST.heavy),
-      single('leg-press', 'Leg press', 3, [10, 12], REST.twoMinutes),
-      single('leg-curl', 'Leg curl', 3, [10, 15], REST.ninetySeconds),
-      single('leg-extension', 'Leg extension', 2, [12, 15], REST.short),
-      single('standing-calf-raise', 'Standing calf raise', 3, [10, 20], REST.short),
-      single('hanging-knee-raise-or-cable-crunch', 'Hanging knee raise or cable crunch', 2, [10, 15], REST.short),
+      single('romanian-deadlift', 'Romanian deadlift (barbell or dumbbells)', 3, [6, 10], REST.heavy, STEP.barbell),
+      single('leg-press', 'Leg press', 3, [10, 12], REST.twoMinutes, STEP.heavy),
+      single('leg-curl', 'Leg curl', 3, [10, 15], REST.ninetySeconds, STEP.stack),
+      single('leg-extension', 'Leg extension', 2, [12, 15], REST.short, STEP.stack),
+      single('standing-calf-raise', 'Standing calf raise', 3, [10, 20], REST.short, STEP.stack),
+      single('hanging-knee-raise-or-cable-crunch', 'Hanging knee raise or cable crunch', 2, [10, 15], REST.short, STEP.stack),
     ],
   },
 };

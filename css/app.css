@@ -677,6 +677,59 @@ h1 {
   color: var(--danger);
 }
 
+/* Backup */
+
+.field {
+  display: block;
+  margin-top: 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.text-input {
+  display: block;
+  width: 100%;
+  height: 48px;
+  margin-top: 6px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  /* 16px or more keeps iOS from zooming in on focus. */
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.text-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(212, 255, 58, 0.15);
+}
+
+.field-hint {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field-hint a {
+  color: var(--accent);
+}
+
+.backup-status {
+  margin-top: 6px;
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.backup-status.is-error {
+  color: var(--danger);
+}
+
 /* History */
 
 .history {

@@ -1,6 +1,11 @@
 import { WORKOUTS, ROTATION, PLAN, GUIDELINES } from './program.js';
+import { BackupError, checkRepo, currentSha, fingerprint, readBackup, writeBackup } from './backup.js';
 
 const STORE_KEY = 'lift-log:v1';
+const BACKUP_KEY = 'lift-log:backup';
+const BACKUP_AFTER_CHANGE_MS = 2 * 60_000;
+const DEFAULT_BACKUP_REPO = 'Baspa/lift-log-data';
+const NEW_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new';
 const TABS = ['train', 'history', 'guide'];
 const STAY_AWAKE_AFTER_LAST_SET_MS = 20 * 60_000;
 const FORGET_TIMER_AFTER_S = 5 * 60;
@@ -9,7 +14,10 @@ const TIMER_TICK_MS = 250;
 const ICONS = {
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>',
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
+  down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>',
+  target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="0.6" fill="currentColor"/></svg>',
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -22,12 +30,17 @@ let timerInterval = null;
 let audioContext = null;
 let wakeLock = null;
 let toastTimeout = null;
+let backupConfig = loadBackupConfig();
+let backupTimeout = null;
+let backupRun = null;
+let backupAgain = false;
+let connecting = false;
 
 function loadStore() {
-  const fresh = { sessions: {}, timer: null, tab: 'train', selection: null, lastLogAt: null };
+  const fresh = { sessions: {}, timer: null, tab: 'train', selection: null, lastLogAt: null, settings: { restTimer: true }, folds: null };
   try {
     const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
-    return saved?.sessions ? { ...fresh, ...saved } : fresh;
+    return saved?.sessions ? { ...fresh, ...saved, settings: { ...fresh.settings, ...saved.settings } } : fresh;
   } catch {
     return fresh;
   }
@@ -39,6 +52,7 @@ function save() {
   } catch {
     toast('Could not save: storage is full or blocked');
   }
+  scheduleBackup();
 }
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -109,14 +123,19 @@ function writeEntry(session, exerciseId, set, patch) {
   session.updatedAt = Date.now();
 }
 
-function previousSets(exerciseId, excludeKey) {
-  let latest = null;
-  for (const session of Object.values(store.sessions)) {
-    if (session.key === excludeKey || !session.sets[exerciseId]?.some((entry) => entry?.done)) continue;
-    const isNewer = !latest || session.date > latest.date || (session.date === latest.date && session.updatedAt > latest.updatedAt);
-    if (isNewer) latest = session;
-  }
-  return latest ? latest.sets[exerciseId].map((entry) => (entry?.done ? entry : null)) : null;
+const repRangeOf = (workoutId, exerciseId) =>
+  WORKOUTS[workoutId]?.blocks.flatMap((block) => block.exercises).find((exercise) => exercise.id === exerciseId)?.reps;
+
+// Done sets per earlier session for one exercise, newest session first. Lower A and B share exercises
+// with different rep ranges, so each session keeps the range it was trained in.
+function exerciseHistory(exerciseId, excludeKey) {
+  return Object.values(store.sessions)
+    .filter((session) => session.key !== excludeKey && session.sets[exerciseId]?.some((entry) => entry?.done))
+    .sort((a, b) => b.date.localeCompare(a.date) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+    .map((session) => ({
+      reps: repRangeOf(session.workoutId, exerciseId),
+      sets: session.sets[exerciseId].map((entry) => (entry?.done ? entry : null)),
+    }));
 }
 
 function previousEntry(previous, set) {
@@ -124,9 +143,57 @@ function previousEntry(previous, set) {
   return previous[set] ?? previous.filter(Boolean).at(-1) ?? null;
 }
 
-function shouldAddWeight(exercise, previous) {
-  const done = previous?.filter(Boolean) ?? [];
-  return done.length >= exercise.sets && done.every((entry) => (entry.r ?? 0) >= exercise.reps[1]);
+const roundTo = (value, step) => Math.round(Math.round(value / step) * step * 100) / 100;
+const isWeighted = (entries) => entries.some((entry) => entry.w > 0);
+const heaviest = (entries) => Math.max(0, ...entries.map((entry) => entry.w ?? 0));
+const allBelowRange = (entries, [low]) => entries.length > 0 && entries.every((entry) => entry.r != null && entry.r < low);
+const lighterWeight = (w, step) => Math.min(roundTo(w * 0.9, step), roundTo(w - step, 0.01));
+
+// Double progression: add reps at the same weight up to the top of the range, then add one weight step and
+// start again at the bottom. Missing the bottom of the range two sessions in a row at the same weight drops it about 10%.
+function progression(exercise, history) {
+  const [last, before] = history;
+  const done = last?.sets.filter(Boolean) ?? [];
+  if (!done.length) return null;
+  const doneBefore = before?.sets.filter(Boolean) ?? [];
+  const [low, high] = exercise.reps;
+  const weighted = isWeighted(done);
+  const atTop = done.length >= exercise.sets && done.every((entry) => (entry.r ?? 0) >= high);
+  const missedTwice = allBelowRange(done, last.reps ?? exercise.reps) && allBelowRange(doneBefore, before?.reps ?? exercise.reps);
+  const notJustDropped = heaviest(doneBefore) <= heaviest(done);
+  const canGoLighter = heaviest(done) > exercise.step;
+  const stalled = weighted && missedTwice && notJustDropped && canGoLighter;
+  const kind = atTop ? (weighted ? 'up' : 'maxed') : stalled ? 'down' : 'reps';
+
+  const sets = Array.from({ length: exercise.sets }, (_, set) => {
+    const { w, r } = previousEntry(last.sets, set);
+    if (kind === 'up') return { w: w > 0 ? nextWeight(w, exercise, history) : w, r: low };
+    if (kind === 'down') return { w: w > exercise.step ? lighterWeight(w, exercise.step) : w, r: low };
+    if (kind === 'maxed') return { w, r: high };
+    return { w, r: r == null ? null : Math.min(Math.max(r + 1, low), high) };
+  });
+  return { kind, sets };
+}
+
+// Pin stacks jump unevenly, so reuse a weight already logged within the jump range before guessing.
+function nextWeight(w, exercise, history) {
+  const logged = history.flatMap((session) => session.sets).map((entry) => entry?.w).filter((value) => value > w && value <= w + exercise.maxStep);
+  return logged.length ? Math.min(...logged) : roundTo(w + exercise.step, 0.01);
+}
+
+function progressionHint(exercise, plan, prefix) {
+  const weights = [...new Set(plan.sets.map((set) => set.w).filter((w) => w > 0))];
+  const weightText = weights.length === 1 ? `${formatNumber(weights[0])} kg` : 'the next weight step';
+  const [low, high] = exercise.reps;
+  const text = {
+    up: `top of the range on every set last time. Go to ${weightText} and aim for ${low}+ reps.`,
+    down: `below ${low} reps two sessions in a row. Drop to ${weightText} and build back up.`,
+    maxed: 'top of the range on every set. Add weight or pick a harder variation.',
+    reps: `same weight, aim for one more rep per set (up to ${high}).`,
+  }[plan.kind];
+  const sentence = prefix ? `${prefix}: ${text}` : text[0].toUpperCase() + text.slice(1);
+  const icon = plan.kind === 'down' ? ICONS.down : plan.kind === 'reps' ? ICONS.target : ICONS.up;
+  return `<p class="hint hint-${plan.kind}">${icon}<span>${sentence}</span></p>`;
 }
 
 function nextOpenStep(steps, session) {
@@ -240,10 +307,23 @@ function workoutView(workoutId) {
 
   return `
     ${hero}
-    ${done === 0 ? '<p class="note"><strong>Warm up first:</strong> 5–7 min easy cardio or mobility, then 2–3 lighter sets before the first lift. Don’t log warm-up sets.</p>' : ''}
     <ol class="blocks">${workout.blocks.map((block, index) => blockCard(block, index, steps, session, next)).join('')}</ol>
     ${done === steps.length ? doneCard(workout, session) : ''}
     ${session ? `<button class="link-danger" data-action="reset-session">Clear today’s ${workout.name} log</button>` : ''}`;
+}
+
+// Done exercises fold away by default; a tap on the chevron overrides that for today's session.
+function isBlockOpen(workoutId, blockIndex, isDone) {
+  const folds = store.folds?.key === sessionKey(isoDate(), workoutId) ? store.folds.open : {};
+  return folds[blockIndex] ?? !isDone;
+}
+
+function toggleBlock(item) {
+  const key = sessionKey(isoDate(), selectedWorkoutId());
+  if (store.folds?.key !== key) store.folds = { key, open: {} };
+  store.folds.open[item.dataset.block] = item.classList.contains('is-folded');
+  save();
+  renderTrain();
 }
 
 function blockCard(block, blockIndex, steps, session, next) {
@@ -251,31 +331,36 @@ function blockCard(block, blockIndex, steps, session, next) {
   const isSuperset = block.exercises.length > 1;
   const isDone = blockSteps.every((step) => isStepDone(session, step));
   const isCurrent = next?.blockIndex === blockIndex;
-  const previous = Object.fromEntries(block.exercises.map((exercise) => [exercise.id, previousSets(exercise.id, session?.key)]));
+  const history = Object.fromEntries(block.exercises.map((exercise) => [exercise.id, exerciseHistory(exercise.id, session?.key)]));
+  const plans = Object.fromEntries(block.exercises.map((exercise) => [exercise.id, progression(exercise, history[exercise.id])]));
 
   const hints = block.exercises
-    .filter((exercise) => shouldAddWeight(exercise, previous[exercise.id]))
-    .map((exercise) => `<p class="hint">${ICONS.up}<span>${isSuperset ? `${exercise.name}: top` : 'Top'} of the range on every set last time. Add a little weight.</span></p>`)
+    .filter((exercise) => plans[exercise.id])
+    .map((exercise) => progressionHint(exercise, plans[exercise.id], isSuperset ? exercise.name : null))
     .join('');
 
   const rows = blockSteps.map((step) => {
     const roundLabel = isSuperset && step.position === 0 ? `<p class="round">Round ${step.set + 1}</p>` : '';
     const label = isSuperset ? `A${step.position + 1}` : `${step.set + 1}`;
-    return roundLabel + setRow(step, label, session, previous[step.exercise.id], step === next);
+    const { id } = step.exercise;
+    return roundLabel + setRow(step, label, session, history[id][0]?.sets, plans[id]?.sets[step.set], step === next);
   });
 
-  const classes = ['block', isSuperset && 'is-superset', isDone && 'is-done', isCurrent && 'is-current'].filter(Boolean).join(' ');
+  const isOpen = isBlockOpen(selectedWorkoutId(), blockIndex, isDone);
+  const name = block.exercises.map((exercise) => exercise.name).join(' + ');
+  const classes = ['block', isSuperset && 'is-superset', isDone && 'is-done', isCurrent && 'is-current', !isOpen && 'is-folded'].filter(Boolean).join(' ');
   return `
     <li class="${classes}" data-block="${blockIndex}">
       <div class="block-head">
         <span class="block-num">${isDone ? ICONS.check : blockIndex + 1}</span>
         <div class="block-title">${isSuperset ? supersetTitle(block) : singleTitle(block)}</div>
+        <button class="block-toggle" data-action="toggle-block" aria-expanded="${isOpen}" aria-label="${isOpen ? 'Hide' : 'Show'} ${name}">${ICONS.chevron}</button>
       </div>
-      ${hints}
+      ${isOpen ? `${hints}
       <div class="sets">
         <div class="set-head" aria-hidden="true"><span>${isSuperset ? '' : 'Set'}</span><span>Last time</span><span>kg</span><span>Reps</span><span></span></div>
         ${rows.join('')}
-      </div>
+      </div>` : ''}
     </li>`;
 }
 
@@ -302,7 +387,7 @@ function supersetTitle({ exercises, rest }) {
     </p>`;
 }
 
-function setRow(step, label, session, previous, isNext) {
+function setRow(step, label, session, previous, target, isNext) {
   const { exercise, set } = step;
   const entry = entryOf(session, exercise.id, set);
   const last = previousEntry(previous, set);
@@ -313,9 +398,9 @@ function setRow(step, label, session, previous, isNext) {
       <span class="set-label">${label}</span>
       <span class="set-prev">${last ? formatEntry(last) : '—'}</span>
       <input class="set-input" data-field="w" inputmode="decimal" enterkeyhint="next" autocomplete="off" aria-label="${what}: weight in kg"
-        placeholder="${last?.w != null ? formatNumber(last.w) : 'kg'}" value="${entry?.w != null ? formatNumber(entry.w) : ''}">
+        placeholder="${target?.w != null ? formatNumber(target.w) : 'kg'}" value="${entry?.w != null ? formatNumber(entry.w) : ''}">
       <input class="set-input" data-field="r" inputmode="numeric" pattern="[0-9]*" enterkeyhint="done" autocomplete="off" aria-label="${what}: reps"
-        placeholder="${last?.r ?? formatRange(exercise.reps)}" value="${entry?.r ?? ''}">
+        placeholder="${target?.r ?? formatRange(exercise.reps)}" value="${entry?.r ?? ''}">
       <button class="check" data-action="toggle-set" aria-pressed="${Boolean(entry?.done)}" aria-label="${what} done">${ICONS.check}</button>
     </div>`;
 }
@@ -366,14 +451,63 @@ function renderHistory() {
     ${sessions.length
       ? `<ul class="history">${sessions.map((session) => (isSkipped(session) ? skippedItem(session) : historyItem(session))).join('')}</ul>`
       : '<section class="card"><p class="sub">Log your first set on the Train tab and it shows up here.</p></section>'}
+    ${backupCard()}`;
+}
+
+function backupCard() {
+  const fileActions = `
+      <div class="actions">
+        <button class="btn" data-action="export">Export</button>
+        <label class="btn">Import<input id="import-file" type="file" accept="application/json,.json" hidden></label>
+      </div>`;
+  const plainInput = 'autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"';
+
+  if (!backupConfig) {
+    return `
     <section class="card">
       <h2>Backup</h2>
-      <p class="sub">Your log is stored on this phone only. Export a backup now and then; import it on a new phone.</p>
+      <p class="sub">Your log is stored on this phone only. Back it up to a private GitHub repo automatically, or export a file now and then.</p>
+      <label class="field">Repository<input id="backup-repo" class="text-input" value="${DEFAULT_BACKUP_REPO}" ${plainInput}></label>
+      <label class="field">Access token<input id="backup-token" class="text-input" type="password" placeholder="github_pat_…" ${plainInput}></label>
+      <p class="field-hint">Make a <a href="${NEW_TOKEN_URL}" target="_blank" rel="noopener">fine-grained token</a> for only this repo, with Contents: Read and write.</p>
       <div class="actions">
-        <button class="btn btn-primary" data-action="export">Export</button>
-        <label class="btn">Import<input id="import-file" type="file" accept="application/json,.json" hidden></label>
+        <button class="btn btn-primary" data-action="backup-connect">Connect</button>
       </div>
+      ${fileActions}
     </section>`;
+  }
+
+  const { text, isError } = backupStatus();
+  return `
+    <section class="card">
+      <h2>Backup</h2>
+      <p class="backup-status${isError ? ' is-error' : ''}">${text}</p>
+      <div class="actions">
+        <button class="btn btn-primary" data-action="backup-now">Back up now</button>
+      </div>
+      ${fileActions}
+      <button class="link-danger" data-action="backup-stop">Stop backing up</button>
+    </section>`;
+}
+
+function backupStatus() {
+  const { repo, status, lastBackupAt, count } = backupConfig;
+  if (backupRun) return { text: 'Backing up…' };
+  if (status === 'error') return { text: 'Token stopped working. Stop backing up and connect with a new token.', isError: true };
+  if (status === 'paused') {
+    return { text: `Paused: this phone has far fewer workouts than the ${count} on GitHub. Stop backing up, then connect again to restore them.`, isError: true };
+  }
+  if (status === 'waiting') return { text: 'Waiting for a connection. It backs up as soon as you are online.' };
+  return { text: `Backed up to ${repo}${lastBackupAt ? ` · ${timeAgo(lastBackupAt)}` : ''}` };
+}
+
+function timeAgo(timestamp) {
+  const minutes = Math.floor((Date.now() - timestamp) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const date = new Date(timestamp);
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return isoDate(date) === isoDate() ? `today ${time}` : `${shortDate.format(date)} ${time}`;
 }
 
 function historyItem(session) {
@@ -443,12 +577,21 @@ function renderGuide() {
       <ul class="howto">
         <li>Train opens the next day in the rotation. Doing a different one? Tap Day 1–4 at the top.</li>
         <li>Can’t make it? Tap <em>Skip this day</em> and the rotation moves on to the next day.</li>
-        <li>Exercises are listed in order. Enter kg and reps, then tap ✓. An empty field copies last time’s value.</li>
-        <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum.</li>
+        <li>Exercises are listed in order. Enter kg and reps, then tap ✓. The grey numbers are today’s target; an empty field logs the target.</li>
+        <li>✓ starts the rest timer. It beeps when the minimum rest is over, and again at the maximum. Turn it off below.</li>
         <li>Supersets: do A1, go straight to A2, then rest.</li>
-        <li><em>Add a little weight</em> shows up when you hit the top of the rep range on every set last time.</li>
+        <li>Finished exercises fold away. Tap the arrow on any exercise to show or hide it.</li>
+        <li>Targets follow double progression: one more rep per set at the same weight until every set hits the top of the range, then one weight step up and back to the bottom of the range. Missing the bottom of the range two sessions in a row at the same weight drops it about 10%.</li>
+        <li>Backup: connect a private GitHub repo under History → Backup. The log then backs itself up after every workout.</li>
         <li>Install: in Safari tap Share → Add to Home Screen. It then runs full screen and works offline.</li>
       </ul>
+    </section>
+    <section class="card">
+      <h2>Settings</h2>
+      <label class="setting">
+        <span><strong>Rest timer</strong><small>Show a countdown after each set</small></span>
+        <input id="setting-rest-timer" class="switch" type="checkbox" role="switch"${store.settings.restTimer ? ' checked' : ''}>
+      </label>
     </section>`;
 }
 
@@ -491,18 +634,17 @@ function toggleSet(row) {
     return;
   }
 
-  const last = previousEntry(previousSets(exerciseId, session.key), set);
+  const steps = stepsOf(workout);
+  const logged = steps.find((step) => step.exercise.id === exerciseId && step.set === set);
+  const target = progression(logged.exercise, exerciseHistory(exerciseId, session.key))?.sets[set];
   writeEntry(session, exerciseId, set, {
-    w: entry?.w ?? last?.w ?? null,
-    r: entry?.r ?? last?.r ?? null,
+    w: entry?.w ?? target?.w ?? null,
+    r: entry?.r ?? target?.r ?? null,
     done: true,
     doneAt: Date.now(),
   });
   session.startedAt ??= Date.now();
   store.lastLogAt = Date.now();
-
-  const steps = stepsOf(workout);
-  const logged = steps.find((step) => step.exercise.id === exerciseId && step.set === set);
   announceNextStep(steps, session, logged);
   save();
   renderTrain();
@@ -517,6 +659,7 @@ function announceNextStep(steps, session, logged) {
     stopTimer();
     releaseWakeLock();
     toast('Workout complete. Nice work!');
+    backupNow();
     return;
   }
   keepAwake();
@@ -525,7 +668,14 @@ function announceNextStep(steps, session, logged) {
     toast(`Superset: straight to ${next.exercise.name}`);
     return;
   }
+  if (!store.settings.restTimer) return;
   startTimer(logged.restAfter, `Next: ${next.exercise.name} · set ${next.set + 1}`);
+}
+
+function setRestTimer(enabled) {
+  store.settings.restTimer = enabled;
+  if (!enabled) stopTimer();
+  save();
 }
 
 function scrollToNext(loggedBlockIndex, session) {
@@ -703,8 +853,10 @@ function toast(message) {
   }, 2600);
 }
 
+const backupData = () => ({ app: 'lift-log', version: 1, sessions: store.sessions });
+
 async function exportBackup() {
-  const json = JSON.stringify({ app: 'lift-log', version: 1, exportedAt: new Date().toISOString(), sessions: store.sessions }, null, 2);
+  const json = JSON.stringify({ ...backupData(), exportedAt: new Date().toISOString() }, null, 2);
   const file = new File([json], `lift-log-${isoDate()}.json`, { type: 'application/json' });
   if (navigator.canShare?.({ files: [file] })) {
     await navigator.share({ files: [file], title: 'Lift Log backup' }).catch(() => {});
@@ -767,6 +919,168 @@ async function importBackup(input) {
   }
 }
 
+function loadBackupConfig() {
+  try {
+    return JSON.parse(localStorage.getItem(BACKUP_KEY) ?? 'null');
+  } catch {
+    return null;
+  }
+}
+
+function storeBackupConfig(config) {
+  backupConfig = config;
+  try {
+    if (config) localStorage.setItem(BACKUP_KEY, JSON.stringify(config));
+    else localStorage.removeItem(BACKUP_KEY);
+  } catch {
+    toast('Could not save the backup settings');
+  }
+  refreshBackupCard();
+}
+
+function updateBackupConfig(patch) {
+  if (backupConfig) storeBackupConfig({ ...backupConfig, ...patch });
+}
+
+// Only the status line changes during a backup; re-rendering History would collapse the workout being read.
+function refreshBackupCard() {
+  if (store.tab !== 'history') return;
+  const status = $('.backup-status');
+  if (status && backupConfig) {
+    const { text, isError } = backupStatus();
+    status.textContent = text;
+    status.classList.toggle('is-error', Boolean(isError));
+  } else if (Boolean(status) !== Boolean(backupConfig)) {
+    renderHistory();
+  }
+}
+
+const BACKUP_PROBLEMS = {
+  error: 'Backup stopped: the GitHub token no longer works. See History → Backup.',
+  paused: 'Backup paused: this phone has far fewer workouts than GitHub. See History → Backup.',
+};
+
+function announceBackupProblem() {
+  const problem = BACKUP_PROBLEMS[backupConfig?.status];
+  if (problem) toast(problem);
+}
+
+function setBackupStatus(config, status, patch = {}) {
+  if (backupConfig !== config) return;
+  const isNew = status !== config.status;
+  updateBackupConfig({ ...patch, status });
+  if (isNew) announceBackupProblem();
+}
+
+// Deleting workouts happens one at a time; a big drop means this phone lost its data, so GitHub's copy is kept.
+const looksLikeDataLoss = (count, backedUp) => (count === 0 && backedUp > 0) || backedUp - count > Math.max(3, backedUp / 2);
+
+function scheduleBackup() {
+  if (!backupConfig) return;
+  clearTimeout(backupTimeout);
+  backupTimeout = setTimeout(backupNow, BACKUP_AFTER_CHANGE_MS);
+}
+
+async function backupNow() {
+  if (!backupConfig) return;
+  if (backupRun) {
+    backupAgain = true;
+    return backupRun;
+  }
+  clearTimeout(backupTimeout);
+  backupRun = runBackup();
+  refreshBackupCard();
+  try {
+    await backupRun;
+  } finally {
+    backupRun = null;
+  }
+  refreshBackupCard();
+  if (backupAgain) {
+    backupAgain = false;
+    await backupNow();
+  }
+}
+
+const isShaConflict = (error) => error instanceof BackupError && (error.status === 409 || error.status === 422);
+const isAccessDenied = (error) => error instanceof BackupError && [401, 403, 404].includes(error.status);
+
+async function runBackup() {
+  const config = backupConfig;
+  if (config.status === 'paused') return;
+  try {
+    const json = JSON.stringify(backupData(), null, 2);
+    const count = loggedSessions().length;
+    const print = await fingerprint(json);
+    if (print === config.fingerprint) return setBackupStatus(config, 'ok');
+    if (looksLikeDataLoss(count, config.count)) return setBackupStatus(config, 'paused');
+    if (!navigator.onLine) return setBackupStatus(config, 'waiting');
+
+    const now = new Date();
+    const message = `Backup ${isoDate(now)} ${pad(now.getHours())}:${pad(now.getMinutes())} · ${count} workout${count === 1 ? '' : 's'}`;
+    let sha;
+    try {
+      sha = await writeBackup(config, json, config.sha, message);
+    } catch (error) {
+      if (!isShaConflict(error)) throw error;
+      sha = await writeBackup(config, json, await currentSha(config), message);
+    }
+    setBackupStatus(config, 'ok', { sha, fingerprint: print, count, lastBackupAt: Date.now() });
+  } catch (error) {
+    setBackupStatus(config, isAccessDenied(error) ? 'error' : 'waiting');
+  }
+}
+
+function connectError(error) {
+  if (!(error instanceof BackupError)) return 'No connection to GitHub. Try again when you are online.';
+  if (error.status === 401) return 'GitHub did not accept that token';
+  if (error.status === 403 || error.status === 404) return 'That token cannot reach the repository';
+  return `GitHub answered ${error.status}. Try again later.`;
+}
+
+async function connectBackup() {
+  if (connecting) return;
+  const repo = $('#backup-repo').value.trim();
+  const token = $('#backup-token').value.trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast('Repository should look like owner/name');
+  if (!token) return toast('Paste your access token first');
+
+  connecting = true;
+  try {
+    await checkRepo({ repo, token });
+    const saved = await readBackup({ repo, token });
+    const remote = Object.values(sanitizeSessions(saved?.sessions));
+    const restorable = remote.filter((session) => session.updatedAt > (store.sessions[session.key]?.updatedAt ?? -1));
+    if (restorable.length) {
+      const count = `${restorable.length} workout${restorable.length === 1 ? '' : 's'}`;
+      if (!confirm(`Restore ${count} from GitHub? Workouts that are newer on this phone stay as they are.`)) return toast('Not connected');
+      for (const session of restorable) store.sessions[session.key] = session;
+      save();
+      render();
+    }
+    const sha = saved ? await currentSha({ repo, token }) : null;
+    storeBackupConfig({ repo, token, sha, fingerprint: null, count: remote.length, lastBackupAt: null, status: 'ok' });
+    toast(restorable.length ? 'Restored and connected' : 'Connected');
+    backupNow();
+  } catch (error) {
+    toast(connectError(error));
+  } finally {
+    connecting = false;
+  }
+}
+
+async function backUpManually() {
+  await backupNow();
+  if (backupConfig?.status === 'ok') toast('Backup is up to date');
+}
+
+function stopBackup() {
+  if (!confirm('Stop backing up to GitHub? Your backups stay in the repository; this phone forgets the token.')) return;
+  clearTimeout(backupTimeout);
+  storeBackupConfig(null);
+  toast('Backup stopped');
+}
+
 document.addEventListener('click', (event) => {
   const button = event.target.closest('button');
   if (!button) return;
@@ -774,6 +1088,7 @@ document.addEventListener('click', (event) => {
   if (button.dataset.tab) return selectTab(button.dataset.tab);
   const actions = {
     'toggle-set': () => toggleSet(button.closest('.set')),
+    'toggle-block': () => toggleBlock(button.closest('.block')),
     'reset-session': resetSession,
     'skip-day': skipDay,
     'undo-skip': undoSkip,
@@ -781,6 +1096,9 @@ document.addEventListener('click', (event) => {
     'timer-skip': stopTimer,
     'delete-session': () => deleteSession(button.dataset.key),
     export: exportBackup,
+    'backup-connect': connectBackup,
+    'backup-now': backUpManually,
+    'backup-stop': stopBackup,
   };
   actions[button.dataset.action]?.();
 });
@@ -791,6 +1109,7 @@ document.addEventListener('input', (event) => {
 
 document.addEventListener('change', (event) => {
   if (event.target.id === 'import-file') importBackup(event.target);
+  if (event.target.id === 'setting-rest-timer') setRestTimer(event.target.checked);
 });
 
 // The keyboard covers the bottom of the screen, so the tab bar and timer only get in the way while typing.
@@ -804,15 +1123,21 @@ document.addEventListener('focusout', () => {
   });
 });
 
+// Also on hide: iOS may suspend the app before the request finishes, but often it gets through.
 document.addEventListener('visibilitychange', () => {
+  backupNow();
   if (document.visibilityState !== 'visible') return;
   if (renderedForDate !== isoDate()) render();
   if (store.timer) tickTimer();
   if (store.lastLogAt && Date.now() - store.lastLogAt < STAY_AWAKE_AFTER_LAST_SET_MS) keepAwake();
 });
 
+window.addEventListener('online', backupNow);
+
 render();
 if (store.timer) showTimer();
+announceBackupProblem();
+backupNow();
 if ('serviceWorker' in navigator) {
   const isUpdate = Boolean(navigator.serviceWorker.controller);
   navigator.serviceWorker.addEventListener('controllerchange', () => {

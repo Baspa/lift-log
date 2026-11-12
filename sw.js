@@ -1,5 +1,5 @@
 // Bump on every deploy: a changed sw.js installs fresh files and the page reloads into them.
-const CACHE = 'lift-log-v7';
+const CACHE = 'lift-log-v8';
 
 const APP_SHELL = [
   './',

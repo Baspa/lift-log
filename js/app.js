@@ -706,6 +706,9 @@ function skipDay() {
   session.skipped = true;
   session.skippedAt = Date.now();
   session.updatedAt = session.skippedAt;
+  store.lastLogAt = null;
+  stopTimer();
+  releaseWakeLock();
   save();
   renderTrain();
   window.scrollTo({ top: 0 });
@@ -901,19 +904,28 @@ function sanitizeSessions(raw) {
   return clean;
 }
 
+function describeSessions(sessions) {
+  const skipped = sessions.filter(isSkipped).length;
+  const workouts = sessions.length - skipped;
+  return [
+    workouts && `${workouts} workout${workouts === 1 ? '' : 's'}`,
+    skipped && `${skipped} skipped day${skipped === 1 ? '' : 's'}`,
+  ].filter(Boolean).join(' and ');
+}
+
 async function importBackup(input) {
   const [file] = input.files ?? [];
   input.value = '';
   if (!file) return;
   try {
     const sessions = sanitizeSessions(JSON.parse(await file.text()).sessions);
-    const count = Object.keys(sessions).length;
+    const count = describeSessions(Object.values(sessions));
     if (!count) throw new Error('No workouts in file');
-    if (!confirm(`Import ${count} workout${count === 1 ? '' : 's'}? Workouts on the same date and day get replaced.`)) return;
+    if (!confirm(`Import ${count}? Workouts on the same date and day get replaced.`)) return;
     Object.assign(store.sessions, sessions);
     save();
     render();
-    toast(`Imported ${count} workout${count === 1 ? '' : 's'}`);
+    toast(`Imported ${count}`);
   } catch {
     toast('That file is not a Lift Log backup');
   }
@@ -1052,14 +1064,13 @@ async function connectBackup() {
     const remote = Object.values(sanitizeSessions(saved?.sessions));
     const restorable = remote.filter((session) => session.updatedAt > (store.sessions[session.key]?.updatedAt ?? -1));
     if (restorable.length) {
-      const count = `${restorable.length} workout${restorable.length === 1 ? '' : 's'}`;
-      if (!confirm(`Restore ${count} from GitHub? Workouts that are newer on this phone stay as they are.`)) return toast('Not connected');
+      if (!confirm(`Restore ${describeSessions(restorable)} from GitHub? Workouts that are newer on this phone stay as they are.`)) return toast('Not connected');
       for (const session of restorable) store.sessions[session.key] = session;
       save();
       render();
     }
     const sha = saved ? await currentSha({ repo, token }) : null;
-    storeBackupConfig({ repo, token, sha, fingerprint: null, count: remote.length, lastBackupAt: null, status: 'ok' });
+    storeBackupConfig({ repo, token, sha, fingerprint: null, count: remote.filter(isLogged).length, lastBackupAt: null, status: 'ok' });
     toast(restorable.length ? 'Restored and connected' : 'Connected');
     backupNow();
   } catch (error) {
